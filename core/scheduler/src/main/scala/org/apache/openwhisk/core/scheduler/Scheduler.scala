@@ -21,15 +21,15 @@ import akka.Done
 import akka.actor.{ActorRef, ActorRefFactory, ActorSelection, ActorSystem, CoordinatedShutdown, Props}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.{HttpRequest, HttpResponse}
-import akka.management.scaladsl.AkkaManagement
 import akka.management.cluster.bootstrap.ClusterBootstrap
+import akka.management.scaladsl.AkkaManagement
 import akka.pattern.ask
 import akka.util.Timeout
 import com.typesafe.config.ConfigValueFactory
 import kamon.Kamon
 import org.apache.openwhisk.common.Https.HttpsConfig
 import org.apache.openwhisk.common._
-import org.apache.openwhisk.core.WhiskConfig.{servicePort, _}
+import org.apache.openwhisk.core.WhiskConfig._
 import org.apache.openwhisk.core.ack.{MessagingActiveAck, UserEventSender}
 import org.apache.openwhisk.core.connector._
 import org.apache.openwhisk.core.database.{ActivationStoreProvider, NoDocumentException, UserContext}
@@ -40,6 +40,7 @@ import org.apache.openwhisk.core.etcd.{EtcdClient, EtcdConfig, EtcdWorker}
 import org.apache.openwhisk.core.scheduler.container.{ContainerManager, CreationJobManager}
 import org.apache.openwhisk.core.scheduler.grpc.ActivationServiceImpl
 import org.apache.openwhisk.core.scheduler.queue._
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{TrackedMemoryQueue, TrackedSchedulingDecisionMaker}
 import org.apache.openwhisk.core.service.{DataManagementService, LeaseKeepAliveService, WatcherService}
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.grpc.ActivationServiceHandler
@@ -195,27 +196,53 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
     : (ActorRefFactory, String, FullyQualifiedEntityName, DocRevision, WhiskActionMetaData) => ActorRef =
     (factory, invocationNamespace, fqn, revision, actionMetaData) => {
       // Todo: Change this to SPI
-      val decisionMaker = factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
 
-      factory.actorOf(
-        MemoryQueue.props(
-          etcdClient,
-          durationChecker,
-          fqn,
-          producer,
-          schedulingConfig,
-          invocationNamespace,
-          revision,
-          schedulerEndpoints,
-          actionMetaData,
-          dataManagementService,
-          watcherService,
-          containerManager,
-          decisionMaker,
-          schedulerId: SchedulerInstanceId,
-          ack,
-          store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
-          getUserLimit: String => Future[Int]))
+      val decisionMaker = if (schedulingConfig.supervisorEnabled)
+        factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig)(actorSystem, ec, logging, etcdClient, watcherService))
+      else
+        factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
+
+      if( schedulingConfig.supervisorEnabled )
+        factory.actorOf(
+          TrackedMemoryQueue.props(
+            etcdClient,
+            durationChecker,
+            fqn,
+            producer,
+            schedulingConfig,
+            invocationNamespace,
+            revision,
+            schedulerEndpoints,
+            actionMetaData,
+            dataManagementService,
+            watcherService,
+            containerManager,
+            decisionMaker,
+            schedulerId: SchedulerInstanceId,
+            ack,
+            store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
+            getUserLimit: String => Future[Int]))
+      else
+        factory.actorOf(
+          MemoryQueue.props(
+            etcdClient,
+            durationChecker,
+            fqn,
+            producer,
+            schedulingConfig,
+            invocationNamespace,
+            revision,
+            schedulerEndpoints,
+            actionMetaData,
+            dataManagementService,
+            watcherService,
+            containerManager,
+            decisionMaker,
+            schedulerId: SchedulerInstanceId,
+            ack,
+            store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
+            getUserLimit: String => Future[Int]))
+
     }
 
   val topic = s"${Scheduler.topicPrefix}scheduler${schedulerId.asString}"
@@ -424,4 +451,5 @@ case class SchedulingConfig(staleThreshold: FiniteDuration,
                             checkInterval: FiniteDuration,
                             dropInterval: FiniteDuration,
                             allowOverProvisionBeforeThrottle: Boolean,
-                            namespaceOverProvisionBeforeThrottleRatio: Double)
+                            namespaceOverProvisionBeforeThrottleRatio: Double,
+                            supervisorEnabled: Boolean)

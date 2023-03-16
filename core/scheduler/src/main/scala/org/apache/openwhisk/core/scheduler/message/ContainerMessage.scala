@@ -39,7 +39,11 @@ case class ContainerDeletion(invocationNamespace: String,
                              action: FullyQualifiedEntityName,
                              revision: DocRevision,
                              whiskActionMetaData: WhiskActionMetaData)
-
+case class ContainersDeletion(containers: Set[String],
+                              invocationNamespace: String,
+                              action: FullyQualifiedEntityName,
+                              revision: DocRevision,
+                              whiskActionMetaData: WhiskActionMetaData)
 sealed trait CreationJob
 case class RegisterCreationJob(msg: ContainerCreationMessage) extends CreationJob
 case class FinishCreationJob(ack: ContainerCreationAckMessage) extends CreationJob

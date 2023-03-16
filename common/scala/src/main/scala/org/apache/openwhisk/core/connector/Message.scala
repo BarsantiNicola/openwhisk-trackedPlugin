@@ -610,6 +610,29 @@ object ContainerDeletionMessage extends DefaultJsonProtocol {
       .apply(_: TransactionId, _: String, _: FullyQualifiedEntityName, _: DocRevision, _: WhiskActionMetaData))
 }
 
+case class ContainersDeletionMessage(override val transid: TransactionId,
+                                     containers: Set[String],
+                                     invocationNamespace: String,
+                                     action: FullyQualifiedEntityName,
+                                     revision: DocRevision,
+                                     whiskActionMetaData: WhiskActionMetaData)
+  extends ContainerMessage(transid) {
+  override def toJson: JsValue = ContainersDeletionMessage.serdes.write(this)
+
+  override def serialize: String = toJson.compactPrint
+}
+
+object ContainersDeletionMessage extends DefaultJsonProtocol {
+  def parse(msg: String): Try[ContainersDeletionMessage] = Try(serdes.read(msg.parseJson))
+
+  private implicit val fqnSerdes = FullyQualifiedEntityName.serdes
+  private implicit val instanceIdSerdes = SchedulerInstanceId.serdes
+  private implicit val byteSizeSerdes = size.serdes
+  implicit val serdes = jsonFormat6(
+    ContainersDeletionMessage
+      .apply(_: TransactionId, _: Set[String], _: String, _: FullyQualifiedEntityName, _: DocRevision, _: WhiskActionMetaData))
+}
+
 abstract class ContainerMessage(private val tid: TransactionId) extends Message {
   override val transid: TransactionId = tid
 

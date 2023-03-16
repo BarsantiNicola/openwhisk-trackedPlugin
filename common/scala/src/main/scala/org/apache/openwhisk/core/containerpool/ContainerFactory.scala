@@ -55,7 +55,8 @@ case class ContainerPoolConfig(userMemory: ByteSize,
                                prewarmPromotion: Boolean,
                                memorySyncInterval: FiniteDuration,
                                batchDeletionSize: Int,
-                               prewarmContainerCreationConfig: Option[PrewarmContainerCreationConfig] = None) {
+                               prewarmContainerCreationConfig: Option[PrewarmContainerCreationConfig] = None,
+                               supervisorEnabled: Boolean) {
   require(
     concurrentPeekFactor > 0 && concurrentPeekFactor <= 1.0,
     s"concurrentPeekFactor must be > 0 and <= 1.0; was $concurrentPeekFactor")

@@ -20,14 +20,10 @@ import akka.actor.{Actor, ActorRef, ActorRefFactory, ActorSystem, Props}
 import akka.event.Logging.InfoLevel
 import org.apache.openwhisk.common.InvokerState.{Healthy, Offline, Unhealthy}
 import org.apache.openwhisk.common._
-import org.apache.openwhisk.core.connector.ContainerCreationError.{
-  containerCreationErrorToString,
-  NoAvailableInvokersError,
-  NoAvailableResourceInvokersError
-}
+import org.apache.openwhisk.core.connector.ContainerCreationError.{NoAvailableInvokersError, NoAvailableResourceInvokersError, containerCreationErrorToString}
 import org.apache.openwhisk.core.connector._
-import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.entity._
+import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.etcd.EtcdKV.ContainerKeys.containerPrefix
 import org.apache.openwhisk.core.etcd.EtcdKV.{ContainerKeys, InvokerKeys}
@@ -38,9 +34,9 @@ import org.apache.openwhisk.core.scheduler.message._
 import org.apache.openwhisk.core.scheduler.queue.{MemoryQueueKey, QueuePool}
 import org.apache.openwhisk.core.service._
 import org.apache.openwhisk.core.{ConfigKeys, WarmUp, WhiskConfig}
+import pureconfig.generic.auto._
 import pureconfig.loadConfigOrThrow
 import spray.json.DefaultJsonProtocol._
-import pureconfig.generic.auto._
 
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ThreadLocalRandom
@@ -92,6 +88,19 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
         .map { invokers =>
           val msg = ContainerDeletionMessage(
             TransactionId.containerDeletion,
+            invocationNamespace,
+            fqn,
+            revision,
+            whiskActionMetaData)
+          invokers.foreach(sendDeletionContainerToInvoker(messagingProducer, _, msg))
+        }
+
+    case ContainersDeletion(containersToDrop, invocationNamespace, fqn, revision, whiskActionMetaData) =>
+      getInvokersWithOldContainer(invocationNamespace, fqn, revision)
+        .map { invokers =>
+          val msg = ContainersDeletionMessage(
+            TransactionId.containerDeletion,
+            containersToDrop,
             invocationNamespace,
             fqn,
             revision,
@@ -293,6 +302,27 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           this,
           start,
           s"posted deletion for ${msg.invocationNamespace}/${msg.action} to ${status.topic}[${status.partition}][${status.offset}]",
+          logLevel = InfoLevel)
+      case Failure(_) =>
+        logging.error(this, s"Failed to delete container for ${msg.action}, error: error on posting to topic $topic")
+        transid.failed(this, start, s"error on posting to topic $topic")
+    }
+  }
+
+  private def sendDeletionContainerToInvoker(producer: MessageProducer,
+                                             invoker: Int,
+                                             msg: ContainersDeletionMessage): Future[ResultMetadata] = {
+    implicit val transid: TransactionId = msg.transid
+
+    val topic = s"${Scheduler.topicPrefix}invoker$invoker"
+    val start = transid.started(this, LoggingMarkers.SCHEDULER_KAFKA, s"posting to $topic")
+
+    producer.send(topic, msg).andThen {
+      case Success(status) =>
+        transid.finished(
+          this,
+          start,
+          s"posted deletion for containers ${msg.containers.toString()} of ${msg.invocationNamespace}/${msg.action} to ${status.topic}[${status.partition}][${status.offset}]",
           logLevel = InfoLevel)
       case Failure(_) =>
         logging.error(this, s"Failed to delete container for ${msg.action}, error: error on posting to topic $topic")
