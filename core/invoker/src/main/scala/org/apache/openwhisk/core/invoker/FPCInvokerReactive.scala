@@ -85,7 +85,7 @@ class FPCInvokerReactive(config: WhiskConfig,
   private val etcdClient = EtcdClient(loadConfigOrThrow[EtcdConfig](ConfigKeys.etcd))
 
   private val grpcConfig = loadConfigOrThrow[GrpcServiceConfig](ConfigKeys.schedulerGrpcService)
-
+  private val supervisorConfig = loadConfigOrThrow[ContainerPoolTrackedConfig](ConfigKeys.supervisorInvokerConfig)
   val watcherService: ActorRef = actorSystem.actorOf(WatcherService.props(etcdClient))
 
   private val leaseService =
@@ -295,24 +295,45 @@ class FPCInvokerReactive(config: WhiskConfig,
   /** Creates a ContainerProxy Actor when being called. */
   private val childFactory = (f: ActorRefFactory) => {
     implicit val transId = TransactionId.invokerNanny
-    f.actorOf(
-      FunctionPullingContainerProxy
-        .props(
-          containerFactory.createContainer,
-          entityStore,
-          namespaceBlacklist,
-          WhiskAction.get,
-          dataManagementService,
-          clientProxyFactory,
-          ack,
-          store,
-          collectLogs,
-          getLiveContainerCount,
-          getWarmedContainerLimit,
-          instance,
-          invokerHealthManager,
-          poolConfig,
-          containerProxyTimeoutConfig))
+    if( supervisorConfig.enableSupervisor )
+      f.actorOf(
+        TrackedFunctionPullingContainerProxy
+          .props(
+            containerFactory.createContainer,
+            entityStore,
+            namespaceBlacklist,
+            WhiskAction.get,
+            dataManagementService,
+            clientProxyFactory,
+            ack,
+            store,
+            collectLogs,
+            getLiveContainerCount,
+            getWarmedContainerLimit,
+            instance,
+            invokerHealthManager,
+            poolConfig,
+            containerProxyTimeoutConfig))
+    else
+      f.actorOf(
+        FunctionPullingContainerProxy
+          .props(
+            containerFactory.createContainer,
+            entityStore,
+            namespaceBlacklist,
+            WhiskAction.get,
+            dataManagementService,
+            clientProxyFactory,
+            ack,
+            store,
+            collectLogs,
+            getLiveContainerCount,
+            getWarmedContainerLimit,
+            instance,
+            invokerHealthManager,
+            poolConfig,
+            containerProxyTimeoutConfig))
+
   }
 
   /** Creates a ActivationClientProxy Actor when being called. */

@@ -23,7 +23,7 @@ import org.apache.openwhisk.core.WarmUp.isWarmUpAction
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.connector.ContainerCreationError.{DBFetchError, InvalidActionLimitError}
 import org.apache.openwhisk.core.connector._
-import org.apache.openwhisk.core.containerpool.v2.{CreationContainer, DeletionContainer}
+import org.apache.openwhisk.core.containerpool.v2.{CreationContainer, DeletionContainer, DeletionContainers}
 import org.apache.openwhisk.core.database.{ArtifactStore, DocumentRevisionMismatchException, NoDocumentException}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.http.Messages
@@ -119,6 +119,13 @@ class ContainerMessageConsumer(
         logging.info(this, s"deletion message for ${deletion.invocationNamespace}/${deletion.action} is received")
         containerPool ! DeletionContainer(deletion)
         feed ! MessageFeed.Processed
+
+      case Success(deletion: ContainersDeletionMessage) =>
+        implicit val transid: TransactionId = deletion.transid
+        logging.info(this, s"deletion message for ${deletion.containers.to} in ${deletion.invocationNamespace}/${deletion.action} is received")
+        containerPool ! DeletionContainers(deletion)
+        feed ! MessageFeed.Processed
+
       case Failure(t) =>
         logging.error(this, s"Failed to parse $bytes, error: ${t.getMessage}")
         feed ! MessageFeed.Processed

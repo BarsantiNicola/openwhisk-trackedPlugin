@@ -55,8 +55,7 @@ case class ContainerPoolConfig(userMemory: ByteSize,
                                prewarmPromotion: Boolean,
                                memorySyncInterval: FiniteDuration,
                                batchDeletionSize: Int,
-                               prewarmContainerCreationConfig: Option[PrewarmContainerCreationConfig] = None,
-                               supervisorEnabled: Boolean) {
+                               prewarmContainerCreationConfig: Option[PrewarmContainerCreationConfig] = None) {
   require(
     concurrentPeekFactor > 0 && concurrentPeekFactor <= 1.0,
     s"concurrentPeekFactor must be > 0 and <= 1.0; was $concurrentPeekFactor")
@@ -75,6 +74,8 @@ case class ContainerPoolConfig(userMemory: ByteSize,
   def cpuShare(reservedMemory: ByteSize) =
     max((totalShare / (userMemory.toBytes / reservedMemory.toBytes)).toInt, 2) // The minimum allowed cpu-shares is 2
 }
+
+case class ContainerPoolTrackedConfig(enableSupervisor: Boolean)
 
 case class PrewarmContainerCreationConfig(maxConcurrent: Int, creationDelay: FiniteDuration) {
   require(maxConcurrent > 0, "maxConcurrent for per invoker must be > 0")

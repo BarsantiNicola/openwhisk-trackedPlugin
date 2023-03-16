@@ -17,40 +17,24 @@
 
 package org.apache.openwhisk.core.containerpool.v2
 
-import java.util.concurrent.atomic.AtomicInteger
-
 import akka.actor.{Actor, ActorRef, ActorRefFactory, Cancellable, Props}
 import org.apache.openwhisk.common._
 import org.apache.openwhisk.core.connector.ContainerCreationError._
-import org.apache.openwhisk.core.connector.{
-  ContainerCreationAckMessage,
-  ContainerCreationMessage,
-  ContainerDeletionMessage,
-  GetState,
-  ResultMetadata
-}
-import org.apache.openwhisk.core.containerpool.{
-  AdjustPrewarmedContainer,
-  BlackboxStartupError,
-  ColdStartKey,
-  ContainerPool,
-  ContainerPoolConfig,
-  ContainerRemoved,
-  PrewarmingConfig,
-  WhiskContainerStartupError
-}
+import org.apache.openwhisk.core.connector._
+import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.http.Messages
 import spray.json.DefaultJsonProtocol
 
+import java.util.concurrent.atomic.AtomicInteger
 import scala.annotation.tailrec
 import scala.collection.concurrent.TrieMap
 import scala.collection.immutable
+import scala.collection.immutable.Queue
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Random, Try}
-import scala.collection.immutable.Queue
 
 object TotalContainerPoolState extends DefaultJsonProtocol {
   implicit val prewarmedPoolSerdes = jsonFormat2(PrewarmedContainerPoolState.apply)
@@ -74,6 +58,7 @@ case class NotSupportedPoolState() {
 
 case class CreationContainer(creationMessage: ContainerCreationMessage, action: WhiskAction)
 case class DeletionContainer(deletionMessage: ContainerDeletionMessage)
+case class DeletionContainers(deletionMessage: ContainersDeletionMessage)
 case object Remove
 case class Keep(timeout: FiniteDuration)
 case class PrewarmContainer(maxConcurrent: Int)
@@ -290,6 +275,45 @@ class FunctionPullingContainerPool(
         }
       })
 
+    case DeletionContainers(deletionMessage: ContainersDeletionMessage) =>
+      val oldRevision = deletionMessage.revision
+      val invocationNamespace = deletionMessage.invocationNamespace
+      val fqn = deletionMessage.action.copy(version = None)
+
+      warmedPool.foreach(warmed => {
+        val proxy = warmed._1
+        val data = warmed._2
+
+        deletionMessage.containers.foreach { container =>
+          if (data.invocationNamespace == invocationNamespace
+            && data.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
+            && data.revision <= oldRevision
+            && container.compareTo(data.container.containerId.asString) == 0) {
+            proxy ! GracefulShutdown
+          }
+        }
+      })
+
+      busyPool.foreach(f = busy => {
+        val proxy = busy._1
+        deletionMessage.containers.foreach { container =>
+          busy._2 match {
+            case warmData: WarmData
+              if warmData.invocationNamespace == invocationNamespace
+                && warmData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
+                && warmData.revision <= oldRevision
+                && container.compareTo(warmData.container.containerId.asString) == 0 =>
+              proxy ! GracefulShutdown
+            case initializedData: InitializedData
+              if initializedData.invocationNamespace == invocationNamespace
+                && initializedData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
+                && container.compareTo(initializedData.container.containerId.asString) == 0 =>
+              proxy ! GracefulShutdown
+            case _ => // Other actions are ignored.
+          }
+        }
+      })
+      
     case ReadyToWork(data) =>
       prewarmStartingPool = prewarmStartingPool - sender()
       prewarmedPool = prewarmedPool + (sender() -> data)

@@ -63,10 +63,10 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
     extends SchedulerCore {
   implicit val ec = actorSystem.dispatcher
   private val authStore = WhiskAuthStore.datastore()
-
   val msgProvider = SpiLoader.get[MessagingProvider]
   val producer = msgProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
 
+  private val supervisorConfig = loadConfigOrThrow[SchedulingSupervisorConfig](ConfigKeys.schedulerSupervisor)
   val maxPeek = loadConfigOrThrow[Int](ConfigKeys.schedulerMaxPeek)
   val etcdClient = EtcdClient(loadConfigOrThrow[EtcdConfig](ConfigKeys.etcd))
   val watcherService: ActorRef = actorSystem.actorOf(WatcherService.props(etcdClient))
@@ -197,12 +197,12 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
     (factory, invocationNamespace, fqn, revision, actionMetaData) => {
       // Todo: Change this to SPI
 
-      val decisionMaker = if (schedulingConfig.supervisorEnabled)
+      val decisionMaker = if (supervisorConfig.enableSupervisor)
         factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig)(actorSystem, ec, logging, etcdClient, watcherService))
       else
         factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
 
-      if( schedulingConfig.supervisorEnabled )
+      if( supervisorConfig.enableSupervisor)
         factory.actorOf(
           TrackedMemoryQueue.props(
             etcdClient,
@@ -451,5 +451,5 @@ case class SchedulingConfig(staleThreshold: FiniteDuration,
                             checkInterval: FiniteDuration,
                             dropInterval: FiniteDuration,
                             allowOverProvisionBeforeThrottle: Boolean,
-                            namespaceOverProvisionBeforeThrottleRatio: Double,
-                            supervisorEnabled: Boolean)
+                            namespaceOverProvisionBeforeThrottleRatio: Double)
+case class SchedulingSupervisorConfig(enableSupervisor: Boolean)
