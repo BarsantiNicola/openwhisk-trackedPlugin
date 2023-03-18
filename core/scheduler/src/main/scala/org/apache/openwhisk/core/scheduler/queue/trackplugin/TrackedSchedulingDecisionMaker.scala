@@ -85,7 +85,7 @@ class TrackedSchedulingDecisionMaker(
 
         case (Running, _) =>
           logging.info(this, s"Identified Running state, forcing to TrackedThrottled")
-          Future.successful(DecisionResults(EnableTrackedRun(supervisor), supervisor.getTimeout))
+          Future.successful(DecisionResults(EnableTrackedRun(supervisor), 0))
 
         // there is no container
         case (TrackedRunning, None) if totalContainers == 0 && !initialized =>

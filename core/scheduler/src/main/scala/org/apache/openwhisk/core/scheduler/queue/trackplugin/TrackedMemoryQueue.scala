@@ -134,9 +134,8 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
   private val memory = actionMetaData.limits.memory.megabytes.MB
   private val queueRemovedMsg = QueueRemoved(invocationNamespace, action.toDocId.asDocInfo(revision), Some(leaderKey))
   private val staleQueueRemovedMsg = QueueRemoved(invocationNamespace, action.toDocId.asDocInfo(revision), None)
-  private var actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig)
   private var supervisor : Option[QueueSupervisor] = None
-
+  private var actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
 
@@ -837,6 +836,7 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
             supervisor = Option(qsv)
           }
           logging.info(this, "RAISED-ENABLE TRACKED")
+          actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
           self ! EnableTrackedRun
 
         case request: RemoveReadyContainer => self ! request
@@ -1405,12 +1405,21 @@ object TrackedMemoryQueue {
     }
   }
 
-  private def getRetentionTimeout(actionMetaData: WhiskActionMetaData, queueConfig: QueueConfig): Long = {
-    if (actionMetaData.exec.kind == ExecMetaDataBase.BLACKBOX) {
-      queueConfig.maxBlackboxRetentionMs
-    } else {
-      queueConfig.maxRetentionMs
-    }
+  private def getRetentionTimeout(actionMetaData: WhiskActionMetaData, queueConfig: QueueConfig, supervisor: Option[QueueSupervisor]): Long = {
+    supervisor match {
+      case Some(v) => v.getTimeout match {
+        case value if value <= 0 =>
+          if (actionMetaData.exec.kind == ExecMetaDataBase.BLACKBOX)
+            queueConfig.maxBlackboxRetentionMs
+          else
+            queueConfig.maxRetentionMs
+        case value if value > 0 => value
+      }
+      case None => if (actionMetaData.exec.kind == ExecMetaDataBase.BLACKBOX)
+                      queueConfig.maxBlackboxRetentionMs
+                   else
+                      queueConfig.maxRetentionMs
+      }
   }
 }
 
