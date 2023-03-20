@@ -21,20 +21,21 @@ import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.entity.FullyQualifiedEntityName
 import org.apache.openwhisk.core.etcd.EtcdClient
-import org.apache.openwhisk.core.scheduler.SchedulingConfig
-import org.apache.openwhisk.core.scheduler.queue.{DecisionResults, Flushing, Pausing, Running, Skip}
+import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
+import org.apache.openwhisk.core.scheduler.queue._
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
-class TrackedSchedulingDecisionMaker(
-                               invocationNamespace: String,
-                               action: FullyQualifiedEntityName,
-                               schedulingConfig: SchedulingConfig)(implicit val actorSystem: ActorSystem, ec: ExecutionContext, logging: Logging, etcdClient: EtcdClient, watcherService: ActorRef)
+class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQualifiedEntityName, watcherService: ActorRef, supervisorConfig: SchedulingSupervisorConfig )
+                                    (implicit val actorSystem: ActorSystem,
+                                     ec: ExecutionContext,
+                                     logging: Logging,
+                                     etcdClient: EtcdClient)
   extends Actor {
 
   private implicit val stateRegistry: StateRegistry = new StateRegistry( invocationNamespace, action.name.name )
-  private val supervisor = new QueueSupervisor( invocationNamespace, action.name.name )
+  private val supervisor = new QueueSupervisor( invocationNamespace, action.name.name, supervisorConfig )
 
   override def receive: Receive = {
     case msg: TrackQueueSnapshot =>
@@ -54,25 +55,20 @@ class TrackedSchedulingDecisionMaker(
   private[queue] def decide(snapshot: TrackQueueSnapshot) = {
     val TrackQueueSnapshot(
     initialized,
-    incoming,
-    currentMsg,
+    _, _,
     existing,
+    _,
     inProgress,
-    _,
-    _,
-    _,
+    _, _, _,
     averageDuration,
     limit,
     _,
     stateName,
     _) = snapshot
 
-    logging.info( this, s"State: ${snapshot.toString}")
     val totalContainers = existing.size + inProgress
-    val availableMsg = currentMsg + incoming.get()
-    logging.info(this, s"RAISED REPORT: $stateName ")
     if (limit <= 0) {
-      logging.info(this, "Limit is behing 0: $limit" )
+      logging.info(this, s"Limit is behing 0: $limit" )
       // this is an error case, the limit should be bigger than 0
       stateName match {
         case Flushing => Future.successful(DecisionResults(Skip, 0))
@@ -99,20 +95,19 @@ class TrackedSchedulingDecisionMaker(
 
         case (TrackedIdle, _) => Future.successful(supervisor.delegate(snapshot))
         // do nothing
-        case _ =>
-          Future.successful(DecisionResults(Skip, 0))
+        case _ => Future.successful(DecisionResults(Skip, 0))
       }
     }
   }
 }
 
 object TrackedSchedulingDecisionMaker {
-  def props(invocationNamespace: String, action: FullyQualifiedEntityName, schedulingConfig: SchedulingConfig)(
+  def props(invocationNamespace: String, action: FullyQualifiedEntityName, watcherService: ActorRef, supervisorConfig: SchedulingSupervisorConfig)(
     implicit actorSystem: ActorSystem,
     ec: ExecutionContext,
     logging: Logging,
-    etcdClient: EtcdClient,
-    watcherService: ActorRef): Props = {
-    Props(new TrackedSchedulingDecisionMaker(invocationNamespace, action, schedulingConfig))
+    etcdClient: EtcdClient
+  ): Props = {
+    Props(new TrackedSchedulingDecisionMaker(invocationNamespace, action, watcherService, supervisorConfig))
   }
 }

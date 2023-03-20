@@ -37,7 +37,7 @@ import org.apache.openwhisk.core.etcd.EtcdKV.{ContainerKeys, QueueKeys, Throttli
 import org.apache.openwhisk.core.scheduler.grpc.{GetActivation, ActivationResponse => GetActivationResponse}
 import org.apache.openwhisk.core.scheduler.message._
 import org.apache.openwhisk.core.scheduler.queue.{NoData, _}
-import org.apache.openwhisk.core.scheduler.{SchedulerEndpoints, SchedulingConfig}
+import org.apache.openwhisk.core.scheduler.{SchedulerEndpoints, SchedulingConfig, SchedulingSupervisorConfig}
 import org.apache.openwhisk.core.service._
 import org.apache.openwhisk.http.Messages.{namespaceLimitUnderZero, tooManyConcurrentRequests}
 import pureconfig.generic.auto._
@@ -70,6 +70,7 @@ case class TrackQueueSnapshot(initialized: Boolean,
                          incomingMsgCount: AtomicInteger,
                          currentMsgCount: Int,
                          currentContainers: Set[String],
+                         readyContainers: Set[String],
                          inProgressContainerCount: Int,
                          staleActivationNum: Int,
                          existingContainerCountInNamespace: Int,
@@ -86,7 +87,9 @@ case class EnableTrackedRun( qsv: QueueSupervisor ) extends RequiredAction
 case class RemoveReadyContainer( containers : Set[String] ) extends RequiredAction
 
 
-class TrackedMemoryQueue(private val etcdClient: EtcdClient,
+class TrackedMemoryQueue(
+                  supervisorConfig: SchedulingSupervisorConfig,
+                  private val etcdClient: EtcdClient,
                   private val durationChecker: DurationChecker,
                   private val action: FullyQualifiedEntityName,
                   messagingProducer: MessageProducer,
@@ -138,7 +141,7 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
   private var actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
-
+  private[queue] var onWorkIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
   private[queue] var in = new AtomicInteger(0)
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
@@ -530,10 +533,13 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
       logging.info(this, "RAISED AP")
+      val droppableContainers = requestBuffer.map { value => value.containerId }.toSet
       containersToDrop.toList.foreach {
         containerId =>
-          removeDeletedContainerFromRequestBuffer(containerId)
-          containers -= containerId
+          if (droppableContainers.contains(containerId)) {
+            removeDeletedContainerFromRequestBuffer(containerId)
+            containers -= containerId
+          }
       }
       containerManager ! ContainersDeletion(containersToDrop, invocationNamespace, action, revision, actionMetaData)
       stay
@@ -545,10 +551,13 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
       logging.info(this, "RAISED AP")
+      val droppableContainers = requestBuffer.map{ value => value.containerId}.toSet
       containersToDrop.toList.foreach {
         containerId =>
-          removeDeletedContainerFromRequestBuffer(containerId)
-          containers -= containerId
+          if(droppableContainers.contains( containerId )){
+            removeDeletedContainerFromRequestBuffer(containerId)
+            containers -= containerId
+          }
       }
       containerManager ! ContainersDeletion(containersToDrop, invocationNamespace, action, revision, actionMetaData)
       stay
@@ -1128,6 +1137,7 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
             in,
             queue.size,
             containers.toSet,
+            requestBuffer.toList.map{ request => request.containerId}.toSet,
             creationIds.size,
             getStaleActivationNum(0, queue),
             namespaceContainerCount.existingContainerNumByNamespace,
@@ -1137,6 +1147,7 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
             actionMetaData.limits.concurrency.maxConcurrent,
             stateName,
             self)
+
         case Failure(_: NoDocumentException) =>
           // no limit available for the namespace
           self ! StopSchedulingAsOutdated
@@ -1318,7 +1329,9 @@ class TrackedMemoryQueue(private val etcdClient: EtcdClient,
 object TrackedMemoryQueue {
   private[queue] val queueConfig = loadConfigOrThrow[QueueConfig](ConfigKeys.schedulerQueue)
 
-  def props(etcdClient: EtcdClient,
+  def props(
+            supervisorConfig: SchedulingSupervisorConfig,
+            etcdClient: EtcdClient,
             durationChecker: DurationChecker,
             fqn: FullyQualifiedEntityName,
             messagingProducer: MessageProducer,
@@ -1338,6 +1351,7 @@ object TrackedMemoryQueue {
     implicit val clock: Clock = SystemClock
     Props(
       new TrackedMemoryQueue(
+        supervisorConfig,
         etcdClient,
         durationChecker,
         fqn: FullyQualifiedEntityName,

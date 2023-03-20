@@ -198,13 +198,15 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
       // Todo: Change this to SPI
 
       val decisionMaker = if (supervisorConfig.enableSupervisor)
-        factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig)(actorSystem, ec, logging, etcdClient, watcherService))
+        factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, watcherService, supervisorConfig)
+        (actorSystem, ec, logging,etcdClient))
       else
         factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
 
       if( supervisorConfig.enableSupervisor)
         factory.actorOf(
           TrackedMemoryQueue.props(
+            supervisorConfig,
             etcdClient,
             durationChecker,
             fqn,
@@ -452,4 +454,4 @@ case class SchedulingConfig(staleThreshold: FiniteDuration,
                             dropInterval: FiniteDuration,
                             allowOverProvisionBeforeThrottle: Boolean,
                             namespaceOverProvisionBeforeThrottleRatio: Double)
-case class SchedulingSupervisorConfig(enableSupervisor: Boolean)
+case class SchedulingSupervisorConfig(enableSupervisor: Boolean, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, policy: String )

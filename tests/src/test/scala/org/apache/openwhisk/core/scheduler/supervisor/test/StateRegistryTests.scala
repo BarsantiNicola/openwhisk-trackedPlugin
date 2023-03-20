@@ -51,9 +51,9 @@ extends TestKit(ActorSystem("WatcherService"))
   it should "Respect the single and multihost registry behavior" in {
     val stateRegistry = new StateRegistry(namespace, action)
 
-    val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-    val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-    val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+    val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+    val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+    val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
 
     logging.info(this, "It should have no updates after initialization..")
     val firstLocalResult: UpdateState = stateRegistry.getUpdateStatus
@@ -63,7 +63,7 @@ extends TestKit(ActorSystem("WatcherService"))
     logging.info(this, "Done")
 
     logging.info(this, "It should have a local update after a publish and It should not have a global " +
-      "update(global update must show only updated coming from others")
+      "update(global update must show only updated coming from others)")
     stateRegistry.publishUpdate(snapshot)
     val secondLocalResult: UpdateState = stateRegistry.getUpdateStatus
     val secondGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
