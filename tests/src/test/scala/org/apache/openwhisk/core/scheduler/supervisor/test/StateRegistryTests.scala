@@ -1,5 +1,6 @@
 package org.apache.openwhisk.core.scheduler.supervisor.test
 
+
 import akka.actor.{ActorRef, ActorSystem}
 import akka.testkit.{TestKit, TestProbe}
 import com.google.protobuf.ByteString
@@ -10,14 +11,17 @@ import com.ibm.etcd.client.kv.WatchUpdate
 import com.ibm.etcd.client.{EtcdClient => Client}
 import common.StreamLogging
 import org.apache.openwhisk.core.etcd.EtcdClient
-import org.apache.openwhisk.core.scheduler.queue.trackplugin.{StateRegistry, TrackQueueSnapshot, TrackedRunning, UpdateState}
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{StateInformation, StateRegistry, TrackQueueSnapshot, TrackedRunning, UpdateForRenew}
 import org.apache.openwhisk.core.service.{WatcherService, mockWatchUpdate}
 import org.junit.runner.RunWith
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.concurrent.ScalaFutures
+
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FlatSpecLike, Matchers}
+
 import java.lang
+import java.sql.Timestamp
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -40,117 +44,213 @@ extends TestKit(ActorSystem("WatcherService"))
   }
 
   private implicit val etcdClient : EtcdClient = new MockEtcdClient(client, true)
-  private implicit var containers : Set[String] = Set[String]().empty
+  private implicit val containers : Set[String] = Set[String]().empty
   private implicit val watcherService: ActorRef = system.actorOf(WatcherService.props(etcdClient))
   private val namespace = "test-namespace"
   private val namespace2 = "test-namespace-2"
   private val action = "test-action"
 
   logging.info(this, "TESTING SINGLE INSTANCE BEHAVIOR")
+  val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+  val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+  val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
 
-  it should "Respect the single and multihost registry behavior" in {
+  //  TEST TO BE EXECUTED WITHOUT FORKED TASKS. StateRegistry operates on a singleton class which produces unpredictable results on the tests
+  it should "Have a consistent initialization state" in{
     val stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry.getStates.isEmpty shouldBe true
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe false
+    localValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    val globalValue =  StateRegistry.getUpdateStatus(namespace, action)
+    globalValue.update shouldBe false
+    globalValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    stateRegistry.clean()
+  }
 
-    val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-    val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-    val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+  it should "Manage removal of a not present state" in{
+    val stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry.clean()
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe false
+    Thread.sleep(50)
+    localValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
 
-    logging.info(this, "It should have no updates after initialization..")
-    val firstLocalResult: UpdateState = stateRegistry.getUpdateStatus
-    val firstGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
-    firstLocalResult.update shouldBe false
-    firstGlobalResult.update shouldBe false
-    logging.info(this, "Done")
+  }
 
-    logging.info(this, "It should have a local update after a publish and It should not have a global " +
-      "update(global update must show only updated coming from others)")
+  it should "Add a first update and notify it" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    val prevTime = stateRegistry.getUpdateStatus.lastUpdate
     stateRegistry.publishUpdate(snapshot)
-    val secondLocalResult: UpdateState = stateRegistry.getUpdateStatus
-    val secondGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
-    secondLocalResult.update shouldBe true
-    secondGlobalResult.update shouldBe false
-    logging.info(this, "Done")
+    val localValue = stateRegistry.getUpdateStatus
+    val equivState = new StateInformation(snapshot)
+    equivState.timestamp = localValue.lastUpdate.getTime+1
+    localValue.update shouldBe true
+    localValue.lastUpdate.after(prevTime) shouldBe true
+    val states : Map[String,StateInformation] = stateRegistry.getStates
+    states.size shouldBe 1
+    states(s"$namespace--$action").check(equivState) shouldBe UpdateForRenew
+    stateRegistry.clean()
+  }
 
-    logging.info(this, "It should remove the update flag after getting the state registry")
-    stateRegistry.getStates
-    val thirdLocalResult: UpdateState = stateRegistry.getUpdateStatus
-    val thirdGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
-    thirdLocalResult.update shouldBe false
-    thirdGlobalResult.update shouldBe false
-    logging.info(this, "Done")
-
-    logging.info(this, "Adding a snapshot without changes from the stored one must not activate the update flag")
+  it should "Remove an update already stored" in {
+    val stateRegistry = new StateRegistry(namespace, action)
     stateRegistry.publishUpdate(snapshot)
-    val forthLocalResult: UpdateState = stateRegistry.getUpdateStatus
-    val forthGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
-    forthLocalResult.update shouldBe false
-    forthGlobalResult.update shouldBe false
-    forthLocalResult.lastUpdate shouldBe thirdLocalResult.lastUpdate
-    forthGlobalResult.lastUpdate shouldBe thirdGlobalResult.lastUpdate
-    logging.info(this, "Done")
+    stateRegistry.clean()
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe false
+    val values = stateRegistry.getStates
+    values.size shouldBe 0
+    stateRegistry.clean()
+  }
 
-    logging.info(this, "Adding a different snapshot should activate the update flag and change the lastUpdate timestamp")
-    stateRegistry.publishUpdate(snapshot2)
-    val fifthLocalResult: UpdateState = stateRegistry.getUpdateStatus
-    val fifthGlobalResult: UpdateState = StateRegistry.getUpdateStatus(namespace, action)
-    fifthLocalResult.update shouldBe true
-    fifthGlobalResult.update shouldBe false
-    fifthLocalResult.lastUpdate should not be forthLocalResult.lastUpdate
-    fifthGlobalResult.lastUpdate should not be forthGlobalResult.lastUpdate
-    logging.info(this, "Done")
-
-    logging.info(this, "TESTING INTERACTIONS BETWEEN TWO LOCAL STATE-REGISTRIES")
-
-    val secondStateRegistry = new StateRegistry(namespace2, action)
-
-    logging.info(this, "A newly created stateregistry should see an update status if previously a publish has been made")
-    stateRegistry.getUpdateStatus.update shouldBe true
-    secondStateRegistry.getUpdateStatus.update shouldBe true
-    logging.info(this, "Done")
-
-    logging.info(this, "It should remove the update flag after getting the state registry only in the involved instance")
+  it should "Reset the local status after a state extraction" in{
+    val stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry.publishUpdate(snapshot)
     stateRegistry.getStates
-    stateRegistry.getUpdateStatus.update shouldBe false
-    secondStateRegistry.getUpdateStatus.update shouldBe true
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe false
+    stateRegistry.clean()
+  }
 
-    secondStateRegistry.getStates
-    stateRegistry.getUpdateStatus.update shouldBe false
-    secondStateRegistry.getUpdateStatus.update shouldBe false
-    logging.info(this, "Done")
-
-    logging.info(this, "It should have a local update after a publish and It should not have a global " +
-      "update(global update must show only updated coming from others")
-    secondStateRegistry.publishUpdate(snapshot2)
-    StateRegistry.getUpdateStatus(namespace, action).update shouldBe true
-    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
-    logging.info(this, "Done")
-
-    logging.info(this, "Adding a snapshot without changes from the stored one must not activate the update flag and change previously update status")
+  it should "Add a new fresh update and notify it" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry.publishUpdate(snapshot)
+    val prevValue = stateRegistry.getUpdateStatus
+    Thread.sleep(50)
+    stateRegistry.getStates
     stateRegistry.publishUpdate(snapshot2)
-    stateRegistry.getUpdateStatus.update shouldBe false
-    StateRegistry.getUpdateStatus(namespace, action).update shouldBe true
-    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
-    logging.info(this, "Done")
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe true
+    localValue.lastUpdate.after(prevValue.lastUpdate) shouldBe true
+    val equivState = new StateInformation(snapshot2)
+    equivState.timestamp = localValue.lastUpdate.getTime + 1
+    val states = stateRegistry.getStates
+    states.size shouldBe 1
+    states(s"$namespace--$action").check(equivState) shouldBe UpdateForRenew
+    stateRegistry.clean()
+  }
 
-    logging.info(this, "It should manage the states independently")
-    stateRegistry.publishUpdate(snapshot3)
+  it should "Never add an old update" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    val testUpdate = new StateInformation(snapshot2)
+    Thread.sleep(50)
+    stateRegistry.publishUpdate(snapshot)
+    StateRegistry.addUpdate( namespace, action, testUpdate) shouldBe false
     stateRegistry.getUpdateStatus.update shouldBe true
-    StateRegistry.getUpdateStatus(namespace, action).update shouldBe true
+    StateRegistry.getUpdateStatus(namespace,action).update shouldBe false
+    stateRegistry.getStates
+    StateRegistry.addUpdate( namespace, action, testUpdate) shouldBe false
+    stateRegistry.getUpdateStatus.update shouldBe false
+    StateRegistry.getUpdateStatus(namespace,action).update shouldBe false
+    stateRegistry.clean()
+  }
+
+  it should "Not add duplicated updates but refreshing the local timestamp" in{
+    val stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry.publishUpdate(snapshot)
+    val time = stateRegistry.getUpdateStatus.lastUpdate
+    Thread.sleep(100)
+    stateRegistry.getStates
+    stateRegistry.publishUpdate(snapshot)
+    val update = stateRegistry.getUpdateStatus
+    update.update shouldBe false
+    update.lastUpdate.after(time) shouldBe false
+    stateRegistry.getStates.get(s"$namespace--$action").get.timestamp > time.getTime shouldBe true
+    stateRegistry.clean()
+  }
+
+  it should "Have a consistent initialization state from other StateRegistry instances" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    val stateRegistry2 = new StateRegistry(namespace2, action)
+    stateRegistry.getStates.isEmpty shouldBe true
+    stateRegistry2.getStates.isEmpty shouldBe true
+    val localValue = stateRegistry.getUpdateStatus
+    val secondLocalValue = stateRegistry2.getUpdateStatus
+    Thread.sleep(50)
+    localValue.update shouldBe false
+    localValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    secondLocalValue.update shouldBe false
+    secondLocalValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    val globalValue = StateRegistry.getUpdateStatus(namespace, action)
+    val globalValue2 = StateRegistry.getUpdateStatus(namespace2, action)
+    globalValue.update shouldBe false
+    globalValue.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    globalValue2.update shouldBe false
+    globalValue2.lastUpdate.before(new Timestamp(System.currentTimeMillis())) shouldBe true
+    stateRegistry.clean()
+    stateRegistry2.clean()
+
+  }
+
+  it should "Add a first update and notify it from other StateRegistry perspective" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    val stateRegistry2 = new StateRegistry(namespace2, action)
+    val prevTime = stateRegistry2.getUpdateStatus.lastUpdate
+    stateRegistry.publishUpdate(snapshot)
+    val localValue = stateRegistry2.getUpdateStatus
+    val globalValue = StateRegistry.getUpdateStatus(namespace, action)
+    val globalValue2 = StateRegistry.getUpdateStatus(namespace2, action)
+    val equivState = new StateInformation(snapshot)
+    equivState.timestamp = globalValue.lastUpdate.getTime + 1
+    localValue.update shouldBe false
+    localValue.lastUpdate.after(prevTime) shouldBe false
+    globalValue.update shouldBe false
+    globalValue2.update shouldBe true
+    val states: Map[String, StateInformation] = stateRegistry2.getStates
+    states.size shouldBe 1
+    states.get(s"$namespace--$action").get.check(equivState) shouldBe UpdateForRenew
+    stateRegistry.clean()
+    stateRegistry2.clean()
+  }
+
+  it should "Manage removal of a not present state from other StateRegistry perspective" in {
+    var stateRegistry = new StateRegistry(namespace, action)
+    val stateRegistry2 = new StateRegistry(namespace2, action)
+    stateRegistry.clean()
+    stateRegistry.getUpdateStatus.update shouldBe false
+    stateRegistry2.getUpdateStatus.update shouldBe false
+    stateRegistry = new StateRegistry(namespace, action)
+    stateRegistry2.getUpdateStatus.update shouldBe false
+    stateRegistry.publishUpdate(snapshot)
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
-
-    secondStateRegistry.getStates
-    StateRegistry.getUpdateStatus(namespace, action).update shouldBe true
+    stateRegistry2.getStates
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
-    secondStateRegistry.getUpdateStatus.update shouldBe false
-    stateRegistry.getUpdateStatus.update shouldBe true
+    stateRegistry.clean()
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
+    stateRegistry2.clean()
+  }
 
+  it should "Removal of an update should be notified to others StateRegistry instances" in{
+    val stateRegistry = new StateRegistry(namespace, action)
+    val stateRegistry2 = new StateRegistry(namespace2, action)
+    stateRegistry.publishUpdate(snapshot)
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
+    stateRegistry2.getStates
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
+    stateRegistry.clean()
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
+    stateRegistry2.clean()
+  }
+
+  it should "Reset the local status after a state extraction only on the given instance" in {
+    val stateRegistry = new StateRegistry(namespace, action)
+    val stateRegistry2 = new StateRegistry(namespace2, action)
+    stateRegistry.publishUpdate(snapshot)
+    StateRegistry.getUpdateStatus(namespace, action).update shouldBe false
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
     stateRegistry.getStates
+    val localValue = stateRegistry.getUpdateStatus
+    localValue.update shouldBe false
+    StateRegistry.getUpdateStatus(namespace, action).update shouldBe false
+    StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
+    stateRegistry2.getStates
     StateRegistry.getUpdateStatus(namespace, action).update shouldBe false
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
-    secondStateRegistry.getUpdateStatus.update shouldBe false
-    stateRegistry.getUpdateStatus.update shouldBe false
-    logging.info(this, "Done")
+    stateRegistry.clean()
+    stateRegistry2.clean()
   }
+
   class MockEtcdClient(client: Client, isLeader: Boolean, leaseNotFound: Boolean = false, failedCount: Int = 1)
     extends EtcdClient(client)(ec) {
     var count = 0
