@@ -454,4 +454,13 @@ case class SchedulingConfig(staleThreshold: FiniteDuration,
                             dropInterval: FiniteDuration,
                             allowOverProvisionBeforeThrottle: Boolean,
                             namespaceOverProvisionBeforeThrottleRatio: Double)
-case class SchedulingSupervisorConfig(enableSupervisor: Boolean, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, policy: String )
+case class SchedulingSupervisorConfig(enableSupervisor: Boolean,
+                                      maxWorkers: Int,
+                                      minWorkers: Int,
+                                      readyWorkers: Int,
+                                      schedulePolicy: String,
+                                      step: Int,
+                                      grade: Int,
+                                      activationPolicy: String,
+                                      maxActivationConcurrency: Int,
+                                      acceptPeriodInMillis: Long)

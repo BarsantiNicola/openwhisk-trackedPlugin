@@ -11,8 +11,8 @@ import com.ibm.etcd.client.{EtcdClient => Client}
 import common.StreamLogging
 import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.trackplugin.{QueueSupervisor, _}
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, DecisionResults, Skip}
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{QueueSupervisor, RemoveReadyContainer, StateInformation, StateRegistry, TrackQueueSnapshot, UpdateState}
 import org.apache.openwhisk.core.service.{WatcherService, mockWatchUpdate}
 import org.junit.runner.RunWith
 import org.scalamock.scalatest.MockFactory
@@ -21,16 +21,13 @@ import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FlatSpecLike, Matchers}
 
 import java.lang
-
-import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{Executor, TimeUnit}
 import scala.annotation.tailrec
-import scala.collection.immutable.Set
-import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.Random
 @RunWith(classOf[JUnitRunner])
-class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
+class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
   with FlatSpecLike
   with Matchers
   with MockFactory
@@ -52,8 +49,8 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
   implicit val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
 
   it should "Add containers only on necessity" in {
-    implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested" )
+
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
     supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4) shouldBe DecisionResults(AddContainer,2)
@@ -63,7 +60,7 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
 
   it should "Respect the maximum containers threshold" in {
     implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4, 0, 0, "AsRequested")
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -79,7 +76,7 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
 
   it should "Respect the ready containers threshold" in{
     implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4, 0, 2, "AsRequested")
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -96,7 +93,7 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
 
   it should "Respect the minimum containers threshold" in{
     implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4, 2, 0, "AsRequested")
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -111,7 +108,7 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
 
   it should "Remove containers only if there are sufficient ready containers" in {
     implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4, 0, 0, "AsRequested")
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -175,7 +172,7 @@ class SupervisorGeneralTest extends TestKit(ActorSystem("WatcherService"))
     extends EtcdClient(client)(ec) {
     var count = 0
     var storedValues = List.empty[(String, String, Long, Long)]
-    var dataMap = Map[String, String]()
+    var dataMap: Map[String, String] = Map[String, String]()
 
     override def putTxn[T](key: String, value: T, cmpVersion: Long, leaseId: Long): Future[TxnResponse] = {
       if (isLeader) {

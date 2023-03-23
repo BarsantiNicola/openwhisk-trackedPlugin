@@ -3,93 +3,10 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Skip}
-
-import java.sql.Timestamp
+import org.apache.openwhisk.core.scheduler.queue.{AddInitialContainer, DecisionResults}
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
-import scala.concurrent.duration.{Duration, SECONDS}
-
-case class UpdateState( update: Boolean, lastUpdate: Timestamp )
-
-abstract class SchedulePolicy(){
-  def grant( minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults
-}
-
-case class AsRequested()(implicit inProgressCreations: AtomicInteger)
-  extends SchedulePolicy{
-  override  def grant(minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults = {
-
-    if (math.max(requestIar, incomingRequests) + enqueuedRequests > totalContainers + inCreationContainers) {
-      //  we haven't enough containers to manage the requests
-
-      //  computation of number of required containers required to manage all the requests
-      val neededContainersCount = math.max(minWorkers-totalContainers-inCreationContainers, math.max(requestIar, incomingRequests) + enqueuedRequests - totalContainers - inCreationContainers).max(0)
-      println(neededContainersCount)
-      //  we can add containers up to maxWorkers value
-      val enoughContainers = maxWorkers - inCreationContainers - totalContainers - neededContainersCount >= 0
-
-      //  we try to give the required containers or at least the maximum usable number
-      val containersToAdd = if (enoughContainers) neededContainersCount else maxWorkers - totalContainers - inCreationContainers
-
-      val enoughReady = maxWorkers - inCreationContainers - totalContainers - containersToAdd >= readyWorkers
-
-      containersToAdd match{
-        case _ if containersToAdd == neededContainersCount && enoughReady  => inProgressCreations.addAndGet(containersToAdd+readyWorkers); DecisionResults(AddContainer, containersToAdd)
-        case _ if containersToAdd == neededContainersCount && !enoughReady =>  inProgressCreations.addAndGet(maxWorkers - inCreationContainers - totalContainers); DecisionResults(AddContainer,maxWorkers - inCreationContainers - totalContainers)
-        case _ if containersToAdd > 0  => inProgressCreations.addAndGet(containersToAdd); DecisionResults(AddContainer, containersToAdd )
-        case _ => DecisionResults(Skip, 0)
-      }
-
-    } else {
-
-
-      //  we have enough containers to manage the incoming requests
-      val remainingReady = readyContainers.size + inCreationContainers-math.max(requestIar, incomingRequests) - enqueuedRequests
-      val tooManyWorkers = totalContainers + inCreationContainers + readyWorkers - remainingReady > maxWorkers
-      val notEnoughWorkers = totalContainers + inCreationContainers < minWorkers
-      val interfere = readyContainers.size - math.max(requestIar, incomingRequests) - enqueuedRequests <= 0
-
-      remainingReady match{
-        case _ if remainingReady < readyWorkers && tooManyWorkers =>  inProgressCreations.addAndGet(maxWorkers-totalContainers-inCreationContainers); DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
-        case _ if remainingReady < readyWorkers && !tooManyWorkers =>  inProgressCreations.addAndGet(readyWorkers-remainingReady); DecisionResults(AddContainer,readyWorkers-remainingReady )
-        case _ if notEnoughWorkers => inProgressCreations.addAndGet(minWorkers-totalContainers); DecisionResults(AddContainer, minWorkers-totalContainers)
-        case _ if remainingReady == readyWorkers => DecisionResults(Skip,0)
-        case _ if totalContainers + inCreationContainers == minWorkers && !notEnoughWorkers => DecisionResults(Skip,0)
-        case _ if !notEnoughWorkers && !interfere => DecisionResults(RemoveReadyContainer(readyContainers.take(remainingReady-readyWorkers)), 0)
-        case _ => DecisionResults(Skip,0)
-      }
-    }
-  }
-}
-/*
-//  removes/adds the requested containers using a maximum fixed number of containers
-case class Steps(stepSize: Int) extends SchedulePolicy{
-  override def grant(num: Int): Int = stepSize match{
-    case _ if stepSize > 0 => math.min( num, stepSize )
-    case _ => math.min( num, 1 )
-  }
-}
-
-case class Poly( grade: Int )(implicit step: Int) extends SchedulePolicy{
-  override def grant(num: Int): Int = grade match{
-    case _ if grade > 0 => math.min(num, math.pow(step, grade).toInt)
-    case _ => math.min(num, step)
-}
-
-//  removes/adds the requested containers in an exponential fashion(at every recursion the number of containers increases)
-case class Exponential(initStep: Int)(implicit step: Int) extends SchedulePolicy {
-
-  override def grant(num: Int): Int = initStep match {
-    case _ if initStep > 2 => math.min(num,)
-    case _ if initStep == 1 => math.min(num, math.pow(2, step - 1).toInt)
-    case _ if initStep > 1 => math.min(num, math.pow(initStep, step).toInt)
-    case _ => math.min(num, math.pow(2, step - 1).toInt)
-  }
-}
-
-//  the opposite of the exponential policy, at every recursion the number of containers decreases exponentially
-case object Logarithmic extends SchedulePolicy*/
+import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
 
 /**
  * Class nested to the SchedulingDecisionMaker actor to control the action containers management. The core parts of the
@@ -109,6 +26,7 @@ case object Logarithmic extends SchedulePolicy*/
  * @param namespace name of the invocation namespace assigned to the memoryQueue
  * @param action    name of the action assigned to the memoryQueue
  */
+
 class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig )(implicit val logging: Logging, val stateRegistry : StateRegistry ) {
 
   // Containers control variables
@@ -122,16 +40,24 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0) //  counter of the containers in progress creations
 
   //  Timers for periodic tasks execution
-  private[QueueSupervisor] val schedulerTimer = new Timer  // periodic scheduler execution
+  private[QueueSupervisor] var schedulerTimer = new Timer // periodic scheduler execution
   private[QueueSupervisor] val metricsTimer = new Timer    // periodic metrics update execution
-  private val schedulerPeriod : Duration = Duration( 30, SECONDS )  //  can be used to change runtime the period of scheduling
+  private var schedulerPeriod: Duration = Duration(30, SECONDS) //  can be used to change runtime the period of scheduling
 
   //  Internal variables
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
-  private[QueueSupervisor]  var policy : SchedulePolicy = supervisorConfig.policy match {
+  private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = supervisorConfig.schedulePolicy match {
     case "AsRequested" => AsRequested()
+    case "Steps" => Steps(supervisorConfig.step)
+    case "Poly" => Poly(supervisorConfig.grade)
     case _ => AsRequested()
+  }
+  private[QueueSupervisor] var activationPolicy : ActivationSchedulePolicy = supervisorConfig.activationPolicy match {
+    case "AcceptAll" => AcceptAll()
+    case "AcceptTill" => AcceptTill(supervisorConfig.maxActivationConcurrency)
+    case "AcceptEvery" => AcceptEvery(supervisorConfig.maxActivationConcurrency, Duration(supervisorConfig.acceptPeriodInMillis,MILLISECONDS))
+    case "RejectAll" => RejectAll()
   }
 
   //  periodic estimation of inter-arrival rate of requests
@@ -142,13 +68,12 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
             acceptedRequests.set( 0 )                 //  resetting the arrival counter every 60s => arrival rate
             rejectedRequests.set( 0 )
           }
-        }, 60000, 60000 )
+        }, 1000, 60000 )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
-  schedulerTimer.schedule( new TimerTask{
+  schedulerTimer.scheduleAtFixedRate( new TimerTask{
           def run(): Unit = schedule( stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
   }, 2000, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
-
 
   /**
    * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact
@@ -162,7 +87,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param states: map with all the information available of the instantiated queues( "namespace--action" -> StateInformation )
    */
   def schedule(localUpdateState: UpdateState, globalUpdateState: UpdateState, states: Map[String, StateInformation]): Unit = {
-
+      //
+      //  PLACE YOUR DYNAMIC SCHEDULER BEHAVIOR HERE
+      //
   }
 
   /**
@@ -170,12 +97,14 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * request arrival
    * @param msg the ActivationMessage received
    * @param containers the number of allocated containers
-   * @param promises the number of ready to go containers
+   * @param ready  the number of containers ready to accept a request
+   * @param enqueued the number of request stored into the queue
+   * @param incoming the number of request incoming to the system
    * @return False if the request has to be rejected, True otherwise
    */
-  def handleActivation(msg: ActivationMessage, containers: Int, promises: Int): Boolean = {
+  def handleActivation(msg: ActivationMessage, containers: Int, ready: Int, enqueued: Int, incoming: Int): Boolean = {
     logging.info(this, s"[$namespace/$action] DELEGATE_AM")
-    val result = true
+    val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
     if (!result)
       rejectedRequests.incrementAndGet()
     else
@@ -210,21 +139,31 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * Changes the scheduling call period without interfering with the actual execution
    * @param time new period to be applied(meaningful only if greater of 200ms, the system evolution happens with a period of 100-170ms)
    */
-  private def changeSchedulerPeriod( time: Duration ): Unit = {
+  def changeSchedulerPeriod( time: Duration ): Unit = {
     schedulerTimer.cancel()
-    schedulerTimer.schedule( new TimerTask {
+    schedulerPeriod= time
+    schedulerTimer = new Timer
+    schedulerTimer.scheduleAtFixedRate( new TimerTask {
       def run(): Unit = schedule(stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates)
-    }, schedulerPeriod.toMillis, schedulerPeriod.toMillis)
+    }, 0, schedulerPeriod.toMillis)
   }
 
   /**
    * Functions to update the policy used by the containers management
    * @param policy A contained policy reaction policy behavior
    */
-  private def updatePolicy( policy: SchedulePolicy ): Unit = policy.synchronized{
-    this.policy = policy
+  private def updateContainerPolicy( policy: ContainerSchedulePolicy ): Unit = containerPolicy.synchronized{
+    this.containerPolicy = policy
   }
 
+  /**
+   * Functions to update the policy used by the containers management
+   *
+   * @param policy A contained policy reaction policy behavior
+   */
+  private def updateActivationPolicy(policy: ActivationSchedulePolicy): Unit = activationPolicy.synchronized{
+    this.activationPolicy = policy
+  }
   /**
    * Sets the number of maximum containers usable by the action. The value must be greated than the minWorker and
    * readyWorker. Note that it is accepted that the value is less than minWorker+readyWorker but this condition not guarantee
@@ -233,7 +172,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The maximum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setMaxWorkers(num: Int): Boolean = num match {
+  def setMaxWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[maxWorkers<minWorkers]. Operation aborted"); false
     case _ if num < readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $readyWorkers)[maxWorkers<readyWorkers]. Operation aborted"); false
@@ -255,10 +194,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The minimum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setMinWorkers(num: Int): Boolean = num match {
+  def setMinWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[minWorkers>maxWorkers]. Operation aborted"); false
-    case _ if num < readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $readyWorkers)[minWorkers<readyWorkers]. Operation aborted"); false
+    case _ if num > readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $readyWorkers)[minWorkers<readyWorkers]. Operation aborted"); false
     case _ if num + readyWorkers > maxWorkers =>
       logging.warn(
         this,
@@ -278,7 +217,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The number of ready containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setReadyWorkers(num: Int): Boolean = num match {
+  def setReadyWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[readyWorkers>maxWorkers]. Operation aborted"); false
     case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[readyWorkers<minWorkers]. Operation aborted"); false
@@ -336,7 +275,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     snapshot = containers  //  make new snapshot for the next elaborate() call
     val inProgressCreationsCount = inProgressCreations.get()
 
-    policy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming)
+    containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming)
 
   }
 

@@ -19,6 +19,8 @@ case object UpdateForChange extends CheckResult  //  the given snapshot is fresh
 case object UpdateForRenew extends CheckResult   //  the given snapshot is fresh but equal to the stored one
 case object NotUpdate extends CheckResult        //  the given snapshot is not fresh
 
+case class UpdateState( update: Boolean, lastUpdate: Timestamp )
+
 /**
  * class for storing queue information. It is just a reduction of the QueueSnapshot to not include global information
  * like existingContainerCount or inProgressContainerCount(only local are needed)

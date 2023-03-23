@@ -487,7 +487,7 @@ class TrackedMemoryQueue(
     // request from a user to execute a request
     case Event(msg: ActivationMessage, _) =>
       logging.info(this, "RAISED AI")
-      if ( supervisor.exists( _.handleActivation( msg, containers.size, creationIds.size)))
+      if ( supervisor.exists( _.handleActivation( msg, containers.size, requestBuffer.size, queue.size, in.get())))
         handleActivationMessage(msg)
       else {
         completeErrorActivation(msg, tooManyConcurrentRequests, isWhiskError = false)
@@ -564,7 +564,7 @@ class TrackedMemoryQueue(
 
     case Event(msg: ActivationMessage, _: NoActors) =>
       logging.info(this, "RAISED AQ")
-      if (supervisor.exists(_.handleActivation(msg, containers.size, creationIds.size))) {
+      if (supervisor.exists(_.handleActivation( msg, containers.size, requestBuffer.size, queue.size, in.get()))) {
 
         val (schedulerActor, droppingActor) = startMonitoring()
         handleActivationMessage(msg)
@@ -1395,7 +1395,7 @@ object TrackedMemoryQueue {
                                  invocationNamespace: String,
                                  actionMetaData: WhiskActionMetaData,
                                  stateName: MemoryQueueState,
-                                 queueRef: ActorRef)(implicit logging: Logging) = {
+                                 queueRef: ActorRef)(implicit logging: Logging): Unit = {
     val action = actionMetaData.fullyQualifiedName(true)
     logging.debug(
       this,
