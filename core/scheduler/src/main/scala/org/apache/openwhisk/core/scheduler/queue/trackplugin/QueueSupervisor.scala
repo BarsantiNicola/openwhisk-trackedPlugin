@@ -3,7 +3,8 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddInitialContainer, DecisionResults}
+import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults}
+
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
 import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
@@ -62,12 +63,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   //  periodic estimation of inter-arrival rate of requests
   metricsTimer.scheduleAtFixedRate( new TimerTask { //  chosen fixed rate to have more precise rate estimations
-          def run(): Unit = {
-            logging.debug( this, s"[$namespace/$action] Periodic IAR update : $iar -> ${(iar+acceptedRequests.get)/2}" )
-            iar = ( iar + acceptedRequests.get())/2  //  moving average of IAR(not count too much on the previous results)
-            acceptedRequests.set( 0 )                 //  resetting the arrival counter every 60s => arrival rate
-            rejectedRequests.set( 0 )
-          }
+          def run(): Unit =  iar = ( iar + acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/
         }, 1000, 60000 )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
@@ -275,7 +271,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     snapshot = containers  //  make new snapshot for the next elaborate() call
     val inProgressCreationsCount = inProgressCreations.get()
 
-    containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming)
+    containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
+      case DecisionResults(AddContainer, value) => inProgressCreations.addAndGet(value); DecisionResults(AddContainer,value)
+      case value => value
+    }
 
   }
 
@@ -295,8 +294,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * Function called periodically by the underlying environment for propagate the queue state. The given information
    * will be stored and eventually propagated to the other schedulers. At the same time the information are used
    * for the internal management of the QueueSupervisor(add remove/container, update inProgress creations)
-   * @param snapshot
-   * @return
+   * @param snapshot Snapshot given by the memoryQueue which describe its state
+   * @return DecisionResults(AddContainer,num) to add containers
+   *         DecisionReults(RemoveReadyContainers(ids),0) to remove containers
+   *         DecisionResults(Skip,0) to do nothing
    */
   def delegate( snapshot: TrackQueueSnapshot ): DecisionResults = {
     stateRegistry.publishUpdate(snapshot)

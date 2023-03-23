@@ -1,7 +1,6 @@
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, DecisionResults, Skip}
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Basic class for the development of policies for the action containers management
@@ -27,11 +26,18 @@ abstract class ContainerSchedulePolicy(){
 
 /**
  * Adds containers basing on the incoming requests respecting a set the set of parameters minWorkers,readyWorkers and maxWorkers
- * @param inProgressCreations internal variable of the QueueSupervisor used to keep track of container creations
  */
-class AsRequested()(implicit inProgressCreations: AtomicInteger)
-  extends ContainerSchedulePolicy{
-  override  def grant(minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults = {
+class AsRequested() extends ContainerSchedulePolicy{
+  override  def grant( minWorkers: Int,
+                       readyWorkers: Int,
+                       maxWorkers: Int,
+                       totalContainers: Int,
+                       readyContainers: Set[String],
+                       inCreationContainers: Int,
+                       requestIar: Int,
+                       enqueuedRequests: Int,
+                       incomingRequests: Int
+                     ): DecisionResults = {
 
     if (math.max(requestIar, incomingRequests) + enqueuedRequests > totalContainers + inCreationContainers) {
       //  we haven't enough containers to manage the requests
@@ -48,9 +54,9 @@ class AsRequested()(implicit inProgressCreations: AtomicInteger)
       val enoughReady = maxWorkers - inCreationContainers - totalContainers - containersToAdd >= readyWorkers
 
       containersToAdd match{
-        case _ if containersToAdd == neededContainersCount && enoughReady  => inProgressCreations.addAndGet(containersToAdd+readyWorkers); DecisionResults(AddContainer, containersToAdd)
-        case _ if containersToAdd == neededContainersCount && !enoughReady =>  inProgressCreations.addAndGet(maxWorkers - inCreationContainers - totalContainers); DecisionResults(AddContainer,maxWorkers - inCreationContainers - totalContainers)
-        case _ if containersToAdd > 0  => inProgressCreations.addAndGet(containersToAdd); DecisionResults(AddContainer, containersToAdd )
+        case _ if containersToAdd == neededContainersCount && enoughReady  => DecisionResults(AddContainer, containersToAdd)
+        case _ if containersToAdd == neededContainersCount && !enoughReady => DecisionResults(AddContainer,maxWorkers - inCreationContainers - totalContainers)
+        case _ if containersToAdd > 0  => DecisionResults(AddContainer, containersToAdd )
         case _ => DecisionResults(Skip, 0)
       }
 
@@ -63,9 +69,9 @@ class AsRequested()(implicit inProgressCreations: AtomicInteger)
       val interfere = readyContainers.size - math.max(requestIar, incomingRequests) - enqueuedRequests <= 0
 
       remainingReady match{
-        case _ if remainingReady < readyWorkers && tooManyWorkers =>  inProgressCreations.addAndGet(maxWorkers-totalContainers-inCreationContainers); DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
-        case _ if remainingReady < readyWorkers && !tooManyWorkers =>  inProgressCreations.addAndGet(readyWorkers-remainingReady); DecisionResults(AddContainer,readyWorkers-remainingReady )
-        case _ if notEnoughWorkers => inProgressCreations.addAndGet(minWorkers-totalContainers); DecisionResults(AddContainer, minWorkers-totalContainers)
+        case _ if remainingReady < readyWorkers && tooManyWorkers =>  DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
+        case _ if remainingReady < readyWorkers && !tooManyWorkers =>  DecisionResults(AddContainer,readyWorkers-remainingReady )
+        case _ if notEnoughWorkers => DecisionResults(AddContainer, minWorkers-totalContainers)
         case _ if remainingReady == readyWorkers => DecisionResults(Skip,0)
         case _ if totalContainers + inCreationContainers == minWorkers && !notEnoughWorkers => DecisionResults(Skip,0)
         case _ if !notEnoughWorkers && !interfere => DecisionResults(RemoveReadyContainer(readyContainers.take(remainingReady-readyWorkers)), 0)
@@ -76,36 +82,59 @@ class AsRequested()(implicit inProgressCreations: AtomicInteger)
 }
 
 object AsRequested {
-  def apply()(implicit inProgressCreation: AtomicInteger): AsRequested = new AsRequested()
+  def apply(): AsRequested = new AsRequested()
 }
 
 /**
  * The containers are added in blocks of stepSize. In case a block cannot be allocated less containers
- * can be added
+ * can be added. The class simply extend the AsRequested method changing the given results to adapt to a step
  * @param stepSize Dimension of the block
- * @param inProgressCreations internal variable of the QueueSupervisor used to keep track of container creations
  */
-case class Steps(stepSize: Int)(implicit inProgressCreations: AtomicInteger) extends AsRequested {
-  override def grant( minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults = {
+case class Steps(stepSize: Int) extends AsRequested {
+  override def grant( minWorkers: Int,
+                      readyWorkers: Int,
+                      maxWorkers: Int,
+                      totalContainers: Int,
+                      readyContainers: Set[String],
+                      inCreationContainers: Int,
+                      requestIar: Int,
+                      enqueuedRequests: Int,
+                      incomingRequests: Int
+                    ): DecisionResults = {
 
     if( inCreationContainers != 0 )
       return DecisionResults( Skip, 0 )
 
-    super.grant(minWorkers, readyWorkers, maxWorkers, totalContainers, readyContainers, inCreationContainers, requestIar, enqueuedRequests, incomingRequests ) match{
-      case DecisionResults(AddContainer, value ) if value>stepSize => inProgressCreations.addAndGet(stepSize - value); DecisionResults(AddContainer, stepSize )
+    super.grant(minWorkers,
+                readyWorkers,
+                maxWorkers,
+                totalContainers,
+                readyContainers,
+                inCreationContainers,
+                requestIar,
+                enqueuedRequests,
+                incomingRequests ) match {
+
+      case DecisionResults(AddContainer, value ) if value>stepSize => DecisionResults(AddContainer, stepSize )
+
       case DecisionResults(AddContainer, value ) =>
         if( totalContainers + inCreationContainers + value - stepSize <= maxWorkers ) {
-          inProgressCreations.addAndGet(value - stepSize)
           DecisionResults(AddContainer, stepSize)
         }else
           DecisionResults(AddContainer, value )
+
       case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size > stepSize => DecisionResults(RemoveReadyContainer(containers.take(stepSize)), 0)
+
       case _ => DecisionResults( Skip, 0 )
     }
   }
 }
 
-case class Poly(grade: Int)(implicit inProgressCreations: AtomicInteger ) extends ContainerSchedulePolicy {
+/**
+ * The containers are added incrementally with the number of steps required to manage the request
+ * @param grade grade of the polynomial series to be generated(ex grade 1 => 1,2,3,4.. grade 2 => 1,4,9,16..)
+ */
+case class Poly(grade: Int) extends ContainerSchedulePolicy {
 
   private var stepCounter :Int = 1
   private var inc : Boolean = true
@@ -143,12 +172,13 @@ case class Poly(grade: Int)(implicit inProgressCreations: AtomicInteger ) extend
   }
 }
 
-/*
-case class All()(implicit inProgressCreations: AtomicInteger ) extends SchedulePolicy{
+case class All() extends ContainerSchedulePolicy{
   override def grant(minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int): DecisionResults = {
 
-
-    if( inCreationContainers + totalContainers < maxWorkers ) inProgressCreations.addAndGet(maxWorkers-totalContainers-inCreationContainers); DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
-    //if( inCreationContainers + totalContainers > maxWorkers )
+    inCreationContainers+totalContainers-maxWorkers match{
+      case value if value > 0 && readyContainers.size >= value => DecisionResults(RemoveReadyContainer(readyContainers.take(value)), 0)
+      case value if value < 0 => DecisionResults(AddContainer, -1*value)
+      case _ => DecisionResults(Skip,0)
+    }
   }
-}*/
+}

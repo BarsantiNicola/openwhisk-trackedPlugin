@@ -1,10 +1,9 @@
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import org.apache.openwhisk.core.connector.ActivationMessage
-
 import java.util.{Timer, TimerTask}
 import java.util.concurrent.atomic.AtomicInteger
-import scala.concurrent.duration.Duration;
+import scala.concurrent.duration.Duration
 
 /**
  * Basic class for the development of policies for the action activation requests management
@@ -25,18 +24,26 @@ abstract class ActivationSchedulePolicy(){
     def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean
 }
 
-
+/**
+ * Policy to accept all the request up to a maximum number of enqueued
+ * @param maxConcurrent maximum number of enqueued request admitted
+ */
 case class AcceptTill( maxConcurrent: Int ) extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = {
         maxConcurrent <= enqueued+1
     }
 }
 
+/**
+ * Policy to accept a maximum number of requests into a given period
+ * @param maxConcurrent maximum number of request that can be accepted into a period
+ * @param period        period duration
+ */
 case class AcceptEvery( maxConcurrent: Int, period: Duration ) extends ActivationSchedulePolicy with AutoCloseable {
 
     private val accept : AtomicInteger = new AtomicInteger(maxConcurrent)
     private val timer = new Timer
-  timer.scheduleAtFixedRate(new TimerTask {
+    timer.scheduleAtFixedRate(new TimerTask {
         override def run(): Unit = accept.set(maxConcurrent)
     }, period.toMillis, period.toMillis)
 
@@ -45,11 +52,17 @@ case class AcceptEvery( maxConcurrent: Int, period: Duration ) extends Activatio
     override def close(): Unit = timer.cancel()
 }
 
+/**
+ * Policy to accept all the requests
+ */
 case class AcceptAll() extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = true
 
 }
 
+/**
+ * Policy to rejects all the requests
+ */
 case class RejectAll() extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = false
 }
