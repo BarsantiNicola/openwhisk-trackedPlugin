@@ -63,7 +63,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   //  periodic estimation of inter-arrival rate of requests
   metricsTimer.scheduleAtFixedRate( new TimerTask { //  chosen fixed rate to have more precise rate estimations
-          def run(): Unit =  iar = ( iar + acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/
+          def run(): Unit =  iar = ( iar + acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/2
         }, 1000, 60000 )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
