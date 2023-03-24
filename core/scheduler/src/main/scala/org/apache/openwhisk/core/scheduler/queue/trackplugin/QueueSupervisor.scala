@@ -193,7 +193,6 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def setMinWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[minWorkers>maxWorkers]. Operation aborted"); false
-    case _ if num > readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $readyWorkers)[minWorkers<readyWorkers]. Operation aborted"); false
     case _ if num + readyWorkers > maxWorkers =>
       logging.warn(
         this,
@@ -257,7 +256,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
-    println(s"Difference $difference")
+
     if( difference > 0 ){  //  if some containers are added means that some inProgress creation are terminated
 
       //  cannot happen just a check

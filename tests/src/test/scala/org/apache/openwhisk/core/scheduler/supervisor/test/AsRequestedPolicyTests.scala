@@ -21,7 +21,6 @@ import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FlatSpecLike, Matchers}
 
 import java.lang
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{Executor, TimeUnit}
 import scala.annotation.tailrec
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -48,8 +47,99 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
   implicit val watcherService: ActorRef = system.actorOf(WatcherService.props(etcdClient))
   implicit val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
 
-  it should "Add containers only on necessity" in {
+  it should "Manage minWorkers, maxWorkers, readyWorkers equal to 0" in{
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 0, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
+    supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4) shouldBe DecisionResults(Skip,0)
+    supervisor.elaborate(parameters._1,parameters._2,parameters._3+1,parameters._4) shouldBe DecisionResults(Skip,0)
+    supervisor.elaborate(parameters._1,parameters._2,parameters._3+2,parameters._4) shouldBe DecisionResults(Skip,0)
+    supervisor.clean()
+  }
 
+  it should "Manage minWorkers, maxWorkers, readyWorkers equal to 1" in{
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 1, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 2, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.clean()
+  }
+
+  it should "Manage minWorkers, maxWorkers, readyWorkers equal to n" in {
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 5, 5, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 5)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 2, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.clean()
+  }
+
+  it should "Manage containers using only maxWorkers" in{
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 2, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(Set("A","B"), parameters._2, parameters._3 + 2, Set("A","B")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B"), parameters._2, parameters._3 + 1, Set("A","B")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")), 0)
+    supervisor.elaborate(Set("B"), parameters._2, parameters._3 + 3, Set("B")) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(Set("B","C","D"), parameters._2, parameters._3, Set("B","C","D")) shouldBe DecisionResults(RemoveReadyContainer(Set("B","C","D")), 0)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 6, parameters._4) shouldBe DecisionResults(AddContainer, 5)
+    supervisor.clean()
+  }
+
+  it should "Manage containers using using maxWorkers and minWorkers" in {
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 2, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 3, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(Set("A", "B"), parameters._2, parameters._3 + 2, Set("A", "B")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B"), parameters._2, parameters._3 + 1, Set("A","B")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")), 0)
+    supervisor.elaborate(Set("B"), parameters._2, parameters._3 + 6, Set("B")) shouldBe DecisionResults(AddContainer, 3)
+    supervisor.elaborate(Set("B", "C", "D","E","F"), parameters._2, parameters._3, Set("B", "C", "D","E","F")) shouldBe DecisionResults(RemoveReadyContainer(Set("E", "F", "B")), 0)
+    supervisor.elaborate(Set("C", "D"), parameters._2, parameters._3 + 6, Set("C", "D")) shouldBe DecisionResults(AddContainer, 3)
+    supervisor.clean()
+  }
+
+  it should "Manage containers using using maxWorkers and readyWorkers" in {
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 4, parameters._4) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(Set("A", "B", "C", "D","E"), parameters._2, parameters._3 + 3, Set("A", "B", "C", "D","E")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A", "B", "C", "D","E"), parameters._2, parameters._3 + 2, Set("A", "B", "C", "D","E")) shouldBe DecisionResults(RemoveReadyContainer(Set("E")), 0)
+    supervisor.elaborate(Set( "A", "B", "C", "D"), parameters._2, parameters._3, Set( "A", "B", "C", "D")) shouldBe DecisionResults(RemoveReadyContainer(Set("A","B")), 0)
+    supervisor.elaborate(Set( "C","D"), parameters._2, parameters._3, Set( "C","D")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set( "C","D"), parameters._2, parameters._3 + 1, Set( "C","D")) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(Set( "C","D","E"), parameters._2, parameters._3 + 3, Set( "C","D","E")) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.clean()
+  }
+
+  it should "Manage containers using using maxWorkers minWorkers and readyWorkers in every possible combination" in {
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 1, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 4, parameters._4) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(Set("A", "B", "C", "D", "E"), parameters._2, parameters._3 + 3, Set("A", "B", "C", "D", "E")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A", "B", "C", "D", "E"), parameters._2, parameters._3 + 2, Set("A", "B", "C", "D", "E")) shouldBe DecisionResults(RemoveReadyContainer(Set("E")), 0)
+    supervisor.elaborate(Set("A", "B", "C", "D"), parameters._2, parameters._3, Set("A", "B", "C", "D")) shouldBe DecisionResults(RemoveReadyContainer(Set("A", "B")), 0)
+    supervisor.elaborate(Set("C", "D"), parameters._2, parameters._3, Set("C", "D")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("C", "D"), parameters._2, parameters._3 + 1, Set("C", "D")) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(Set("C", "D", "E"), parameters._2, parameters._3 + 3, Set("C", "D", "E")) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.clean()
+  }
+
+  it should "Add containers only on necessity" in {
     val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
@@ -58,8 +148,7 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
     supervisor.elaborate(parameters._1, parameters._2+1, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 1)
   }
 
-  it should "Respect the maximum containers threshold" in {
-    implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
+  it should "Wait to have some ready containers to remove them" in {
     val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
@@ -75,8 +164,7 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
   }
 
   it should "Respect the ready containers threshold" in{
-    implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,2, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -84,16 +172,16 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
     supervisor.elaborate(parameters._1, parameters._2+1, parameters._3, parameters._4) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(Set("A"), parameters._2+1, parameters._3, Set("A")) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(Set("A","B"), parameters._2+2, parameters._3, Set("A","B")) shouldBe DecisionResults(AddContainer, 1)
-    supervisor.elaborate(Set("A","B"), parameters._2+1, parameters._3, Set("A","B")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")), 0)
-    supervisor.elaborate(Set("B"), parameters._2+1, parameters._3, Set("B")) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(Set("B"), 6, parameters._3, Set("B")) shouldBe DecisionResults(AddContainer, 1)
-    supervisor.elaborate(Set("B","A"), 0, parameters._3, Set("B","A")) shouldBe DecisionResults(RemoveReadyContainer(Set("B","A")), 0)
+    supervisor.elaborate(Set("A","B"), parameters._2+1, parameters._3, Set("A","B")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B","C","D"), parameters._2+1, parameters._3, Set("A","B","C","D")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")), 0)
+    supervisor.elaborate(Set("B","C","D"), parameters._2+1, parameters._3, Set("B","C","D")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("B","C","D"), 6, parameters._3, Set("B","C","D")) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(Set("B","C","D","E"), 0, parameters._3, Set("B","C","D","E")) shouldBe DecisionResults(RemoveReadyContainer(Set("B","C")), 0)
     supervisor.elaborate(Set("C","D"), 0, parameters._3, Set("C","D")) shouldBe DecisionResults(Skip, 0)
   }
 
   it should "Respect the minimum containers threshold" in{
-    implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,2,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
@@ -107,7 +195,6 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
   }
 
   it should "Remove containers only if there are sufficient ready containers" in {
-    implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0)
     val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
@@ -121,6 +208,40 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
     supervisor.elaborate(parameters._1++Set("A","B","C","D"), parameters._2 + 1, parameters._3, parameters._4++Set("A","B","C","D")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")),0)
   }
 
+  it should "React to a dynamic change of the parameters" in{
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config)
+    val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
+    supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.setMaxWorkers(2)
+    supervisor.elaborate(parameters._1, parameters._2 , 1, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(parameters._1, parameters._2 , 3, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.setMaxWorkers(1)
+    supervisor.elaborate(parameters._1, parameters._2, 3, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A"), parameters._2, 3, Set("A")) shouldBe DecisionResults(RemoveReadyContainer(Set("A")), 0)
+    supervisor.setReadyWorkers(1)
+    supervisor.elaborate(parameters._1, parameters._2, 3, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.setMaxWorkers(4)
+    supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.setMinWorkers(3)
+    supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.setReadyWorkers(3)
+    supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.elaborate(parameters._1, parameters._2, 2, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.setMaxWorkers(5)
+    supervisor.elaborate(parameters._1, parameters._2, 2, parameters._4) shouldBe DecisionResults(AddContainer, 1)
+    supervisor.setMinWorkers(0)
+    supervisor.elaborate(parameters._1, parameters._2, 2, parameters._4) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B","C","D","E"), parameters._2, 2, Set("A","B","C","D","E")) shouldBe DecisionResults(Skip, 0)
+    supervisor.setReadyWorkers(0)
+    supervisor.elaborate(Set("A","B","C","D","E"), parameters._2, 2, Set("A","B","C","D","E")) shouldBe DecisionResults(RemoveReadyContainer(Set("E","A","B")), 0)
+    supervisor.elaborate(Set("C","D"), parameters._2, 0, Set("C","D")) shouldBe DecisionResults(RemoveReadyContainer(Set("C","D")), 0)
+    supervisor.setReadyWorkers(2)
+    supervisor.elaborate(parameters._1, parameters._2, 0, parameters._1) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.setMinWorkers(3)
+    supervisor.elaborate(parameters._1, parameters._2, 0, parameters._1) shouldBe DecisionResults(AddContainer, 1)
+  }
   def createContainers(num:Int): Set[String] = {
 
     @tailrec

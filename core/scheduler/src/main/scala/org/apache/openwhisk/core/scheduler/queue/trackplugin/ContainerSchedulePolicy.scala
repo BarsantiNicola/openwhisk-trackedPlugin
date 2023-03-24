@@ -39,44 +39,22 @@ class AsRequested() extends ContainerSchedulePolicy{
                        incomingRequests: Int
                      ): DecisionResults = {
 
-    if (math.max(requestIar, incomingRequests) + enqueuedRequests > totalContainers + inCreationContainers) {
-      //  we haven't enough containers to manage the requests
+    val readyCheck = readyContainers.size - math.max(incomingRequests, requestIar )-enqueuedRequests-readyWorkers
 
-      //  computation of number of required containers required to manage all the requests
-      val neededContainersCount = math.max(minWorkers-totalContainers-inCreationContainers, math.max(requestIar, incomingRequests) + enqueuedRequests - totalContainers - inCreationContainers).max(0)
-      println(neededContainersCount)
-      //  we can add containers up to maxWorkers value
-      val enoughContainers = maxWorkers - inCreationContainers - totalContainers - neededContainersCount >= 0
+    val result = if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( math.max(incomingRequests, requestIar )+enqueuedRequests+readyWorkers, minWorkers)) match{
+      case requiredContainers if requiredContainers > totalContainers+inCreationContainers => DecisionResults(AddContainer, requiredContainers-totalContainers-inCreationContainers)
+      case requiredContainers if requiredContainers == totalContainers+inCreationContainers => DecisionResults(Skip,0)
+      case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck > 0 => DecisionResults(RemoveReadyContainer(readyContainers.take(math.min(readyCheck, totalContainers+inCreationContainers-minWorkers))), 0)
+      case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck == 0 => DecisionResults(Skip,0)
+      case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck < 0 => DecisionResults(AddContainer, math.min(maxWorkers-totalContainers-inCreationContainers, -1*readyCheck))
 
-      //  we try to give the required containers or at least the maximum usable number
-      val containersToAdd = if (enoughContainers) neededContainersCount else maxWorkers - totalContainers - inCreationContainers
+    } else DecisionResults(RemoveReadyContainer(readyContainers.take( totalContainers+inCreationContainers-maxWorkers)), 0)
 
-      val enoughReady = maxWorkers - inCreationContainers - totalContainers - containersToAdd >= readyWorkers
-
-      containersToAdd match{
-        case _ if containersToAdd == neededContainersCount && enoughReady  => DecisionResults(AddContainer, containersToAdd)
-        case _ if containersToAdd == neededContainersCount && !enoughReady => DecisionResults(AddContainer,maxWorkers - inCreationContainers - totalContainers)
-        case _ if containersToAdd > 0  => DecisionResults(AddContainer, containersToAdd )
-        case _ => DecisionResults(Skip, 0)
-      }
-
-    } else {
-
-      //  we have enough containers to manage the incoming requests
-      val remainingReady = readyContainers.size + inCreationContainers-math.max(requestIar, incomingRequests) - enqueuedRequests
-      val tooManyWorkers = totalContainers + inCreationContainers + readyWorkers - remainingReady > maxWorkers
-      val notEnoughWorkers = totalContainers + inCreationContainers < minWorkers
-      val interfere = readyContainers.size - math.max(requestIar, incomingRequests) - enqueuedRequests <= 0
-
-      remainingReady match{
-        case _ if remainingReady < readyWorkers && tooManyWorkers =>  DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
-        case _ if remainingReady < readyWorkers && !tooManyWorkers =>  DecisionResults(AddContainer,readyWorkers-remainingReady )
-        case _ if notEnoughWorkers => DecisionResults(AddContainer, minWorkers-totalContainers)
-        case _ if remainingReady == readyWorkers => DecisionResults(Skip,0)
-        case _ if totalContainers + inCreationContainers == minWorkers && !notEnoughWorkers => DecisionResults(Skip,0)
-        case _ if !notEnoughWorkers && !interfere => DecisionResults(RemoveReadyContainer(readyContainers.take(remainingReady-readyWorkers)), 0)
-        case _ => DecisionResults(Skip,0)
-      }
+    result match {
+      case DecisionResults( AddContainer, 0 ) => DecisionResults(Skip, 0)
+      case DecisionResults( AddContainer, value) if value < 0 => DecisionResults(Skip, 0)
+      case DecisionResults( RemoveReadyContainer(set), 0) if set.isEmpty => DecisionResults(Skip, 0)
+      case value => value
     }
   }
 }
