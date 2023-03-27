@@ -51,7 +51,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = supervisorConfig.schedulePolicy match {
     case "AsRequested" => AsRequested()
     case "Steps" => Steps(supervisorConfig.step)
-    case "Poly" => Poly(supervisorConfig.grade)
+    case "Poly" =>  Poly(supervisorConfig.grade)
+    case "IPoly" => IPoly(supervisorConfig.grade)
+    case "Fibonacci" => Fibonacci()
+    case "All"  =>  All()
     case _ => AsRequested()
   }
   private[QueueSupervisor] var activationPolicy : ActivationSchedulePolicy = supervisorConfig.activationPolicy match {

@@ -2,6 +2,9 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, DecisionResults, Skip}
 
+import scala.annotation.tailrec
+
+
 /**
  * Basic class for the development of policies for the action containers management
  */
@@ -41,16 +44,15 @@ class AsRequested() extends ContainerSchedulePolicy{
 
     val readyCheck = readyContainers.size - math.max(incomingRequests, requestIar )-enqueuedRequests-readyWorkers
 
-    val result = if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( math.max(incomingRequests, requestIar )+enqueuedRequests+readyWorkers, minWorkers)) match{
+    (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( math.max(incomingRequests, requestIar )+enqueuedRequests+readyWorkers, minWorkers)) match{
       case requiredContainers if requiredContainers > totalContainers+inCreationContainers => DecisionResults(AddContainer, requiredContainers-totalContainers-inCreationContainers)
       case requiredContainers if requiredContainers == totalContainers+inCreationContainers => DecisionResults(Skip,0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck > 0 => DecisionResults(RemoveReadyContainer(readyContainers.take(math.min(readyCheck, totalContainers+inCreationContainers-minWorkers))), 0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck == 0 => DecisionResults(Skip,0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck < 0 => DecisionResults(AddContainer, math.min(maxWorkers-totalContainers-inCreationContainers, -1*readyCheck))
 
-    } else DecisionResults(RemoveReadyContainer(readyContainers.take( totalContainers+inCreationContainers-maxWorkers)), 0)
+    } else DecisionResults(RemoveReadyContainer(readyContainers.take( totalContainers+inCreationContainers-maxWorkers)), 0)) match {
 
-    result match {
       case DecisionResults( AddContainer, 0 ) => DecisionResults(Skip, 0)
       case DecisionResults( AddContainer, value) if value < 0 => DecisionResults(Skip, 0)
       case DecisionResults( RemoveReadyContainer(set), 0) if set.isEmpty => DecisionResults(Skip, 0)
@@ -83,6 +85,10 @@ case class Steps(stepSize: Int) extends AsRequested {
     if( inCreationContainers != 0 )
       return DecisionResults( Skip, 0 )
 
+    val systemFree = math.max(requestIar, incomingRequests) + enqueuedRequests == 0
+    def outsideScope(value: Int): Boolean = totalContainers +inCreationContainers - value == 0 ||
+      totalContainers +inCreationContainers - value == math.max(readyWorkers,minWorkers)
+
     super.grant(minWorkers,
                 readyWorkers,
                 maxWorkers,
@@ -93,70 +99,158 @@ case class Steps(stepSize: Int) extends AsRequested {
                 enqueuedRequests,
                 incomingRequests ) match {
 
-      case DecisionResults(AddContainer, value ) if value>stepSize => DecisionResults(AddContainer, stepSize )
+      case DecisionResults(AddContainer, value ) if value>=stepSize => DecisionResults( AddContainer, stepSize )
 
-      case DecisionResults(AddContainer, value ) =>
-        if( totalContainers + inCreationContainers + value - stepSize <= maxWorkers ) {
-          DecisionResults(AddContainer, stepSize)
+      case DecisionResults(AddContainer, _ ) =>
+        if( totalContainers + inCreationContainers + stepSize >= maxWorkers ) {
+          DecisionResults(AddContainer, maxWorkers - totalContainers - inCreationContainers)
         }else
-          DecisionResults(AddContainer, value )
+          DecisionResults(AddContainer, stepSize )
 
       case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size > stepSize => DecisionResults(RemoveReadyContainer(containers.take(stepSize)), 0)
-
-      case _ => DecisionResults( Skip, 0 )
+      case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size == stepSize => DecisionResults(RemoveReadyContainer(containers), 0)
+      case DecisionResults(RemoveReadyContainer(containers),0) if containers.size < stepSize && systemFree && outsideScope(containers.size) =>
+         DecisionResults(RemoveReadyContainer(containers),0)
+      case DecisionResults(RemoveReadyContainer(containers),0) if containers.size < stepSize && systemFree => DecisionResults(RemoveReadyContainer(readyContainers.take(stepSize)),0)
+      case value => println(s"${value.toString} $systemFree ${outsideScope(1)}"); DecisionResults( Skip, 0 )
     }
   }
 }
 
 /**
- * The containers are added incrementally with the number of steps required to manage the request
- * @param grade grade of the polynomial series to be generated(ex grade 1 => 1,2,3,4.. grade 2 => 1,4,9,16..)
+ * It always allocate to the action maxWorkers containers
  */
-case class Poly(grade: Int) extends ContainerSchedulePolicy {
-
-  private var stepCounter :Int = 1
-  private var inc : Boolean = true
-
-  override def grant( minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults = {
-
-    if( inCreationContainers != 0 )
-      return DecisionResults( Skip, 0 )
-
-    val toMaxContainerToAdd = maxWorkers-totalContainers
-    val requiredContainers = (totalContainers < math.max( incomingRequests, requestIar) + enqueuedRequests ||
-      totalContainers < minWorkers ||
-      readyContainers.size < readyWorkers) && totalContainers >= maxWorkers
-
-    val containersToAdd = requiredContainers match{
-      case true if !inc =>
-        stepCounter=1
-        inc = !inc
-        1
-      case false if inc =>
-        stepCounter=1
-        inc = !inc
-        1
-      case _ => stepCounter+=1; math.pow( stepCounter-1, grade ).toInt;
-    }
-    val tooManyContainers = if( inc ) totalContainers + containersToAdd > maxWorkers else totalContainers-containersToAdd < minWorkers
-    val stay = readyContainers.size-containersToAdd < readyWorkers + containersToAdd/2
-
-    requiredContainers match {
-      case true if tooManyContainers => stepCounter = 1; DecisionResults(AddContainer, toMaxContainerToAdd)
-      case true => DecisionResults(AddContainer, containersToAdd)
-      case false if stay => stepCounter = 1; DecisionResults(Skip, 0)
-      case _ => DecisionResults( RemoveReadyContainer(readyContainers.take(containersToAdd)), 0)
-    }
-  }
-}
-
 case class All() extends ContainerSchedulePolicy{
   override def grant(minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int): DecisionResults = {
 
     inCreationContainers+totalContainers-maxWorkers match{
       case value if value > 0 && readyContainers.size >= value => DecisionResults(RemoveReadyContainer(readyContainers.take(value)), 0)
+      case value if value > 0 => DecisionResults(RemoveReadyContainer(readyContainers),0)
       case value if value < 0 => DecisionResults(AddContainer, -1*value)
       case _ => DecisionResults(Skip,0)
     }
+  }
+}
+
+/**
+ * Containers are added basing on array which defines the number of containers to be allocated. Using an index, if the required
+ * containers are greater/lower than the available the system moves to higher/lower indexes granting the number of containers specified
+ * ex: [0,1,2,10] => if required ==1, returns 1 if required ==4, returns 10
+ * Abstract class which requires only to define a method for creating the array to use
+ */
+abstract class BlocksPolicy extends ContainerSchedulePolicy {
+
+    private var index = 0
+    def computeAllocationArray(maxWorkers: Int ): Array[Int]
+
+    override def grant( minWorkers: Int,
+                        readyWorkers: Int,
+                        maxWorkers: Int,
+                        totalContainers: Int,
+                        readyContainers: Set[String],
+                        inCreationContainers: Int,
+                        requestIar: Int,
+                        enqueuedRequests: Int,
+                        incomingRequests: Int
+                      ): DecisionResults = {
+
+      if (inCreationContainers != 0)
+        return DecisionResults(Skip, 0)
+
+      val requestsToServe = math.max(requestIar, incomingRequests)+enqueuedRequests
+      val offset = if( requestsToServe < math.max(minWorkers,readyWorkers) ) math.max(minWorkers, readyWorkers) else readyWorkers
+      val requiredContainers = requestsToServe + offset
+      val allocationArray = computeAllocationArray(maxWorkers)
+
+      if( index >= allocationArray.length ){
+        if( readyContainers.size >= totalContainers- allocationArray(allocationArray.length-1)) {
+          index = allocationArray.length-1
+          return DecisionResults( RemoveReadyContainer(readyContainers.take(totalContainers-allocationArray(index))),0)
+        }else
+          return DecisionResults(Skip,0)
+      }
+      val sufficientReady = if( index > 0 ) allocationArray(index)-allocationArray(index-1) +readyWorkers <= readyContainers.size else false
+
+      (requiredContainers-allocationArray(index) match{
+
+        case value if value > 0 && index < allocationArray.length-1 => index+=1; DecisionResults( AddContainer, allocationArray(index)-totalContainers)
+        case value if value > 0 => DecisionResults( AddContainer, allocationArray(index)-totalContainers)
+        case value if value < 0 && index > 0 && requiredContainers <= allocationArray(index-1) && sufficientReady => index-=1; DecisionResults( RemoveReadyContainer(readyContainers.take(allocationArray(index+1)-allocationArray(index))),0)
+        case value if value < 0 && index == allocationArray.length-1 => if( totalContainers-allocationArray(index) > 0) DecisionResults(RemoveReadyContainer(readyContainers.take(totalContainers-allocationArray(index))),0) else DecisionResults(AddContainer, allocationArray(index)-totalContainers)
+        case value if value < 0 && index == 0 => DecisionResults( RemoveReadyContainer(readyContainers.take(totalContainers-allocationArray(index))),0)
+        case _ => DecisionResults(Skip,0)
+
+      }) match{
+
+        case DecisionResults(AddContainer,0 ) => DecisionResults(Skip,0)
+        case DecisionResults(RemoveReadyContainer(containers),_) if containers.isEmpty => DecisionResults(Skip,0)
+        case value => value
+
+      }
+    }
+  }
+
+/**
+ * The containers are added incrementally with the number of steps required to manage the request
+ * @param grade grade of the polynomial series to be generated(ex grade 1 => 1,2,3,4.. grade 2 => 1,4,9,16..)
+ */
+case class Poly( grade: Int ) extends BlocksPolicy{
+  override def computeAllocationArray(maxWorkers: Int ): Array[Int] = {
+
+    @tailrec
+    def create(prevValue: Int, result: Array[Int]): Array[Int] = {
+      if (prevValue + math.pow(result.length, grade) >= maxWorkers) return result ++ Array[Int](maxWorkers)
+      create(prevValue + math.pow(result.length, grade).toInt,
+        result ++ Array[Int](prevValue + math.pow(result.length, grade).toInt))
+    }
+
+    create(0, Array[Int](0))
+  }
+}
+
+/**
+ * Has a behavior opposite to the poly, while the poly adds greater blocks with the incrementing of the index the IPoly
+ * decrements the block size
+ * @param grade grade of the polynomial series to be used(ex grade 1 max 10 => 1, 2, 3, 4.. grade 2 => 6,3,2,1..)
+ */
+case class IPoly(grade: Int) extends BlocksPolicy{
+  override def computeAllocationArray(maxWorkers: Int): Array[Int] = {
+
+    @tailrec
+    def poly(result: Array[Int]): (Array[Int],Int) = {
+      if (math.pow(result.length, grade) >= maxWorkers) return (Array[Int](maxWorkers), maxWorkers-math.pow(result.length-1, grade).toInt)
+      poly(result ++ Array[Int](math.pow(result.length, grade).toInt))
+    }
+
+    //  returns an array of polynomial values until they are less of maxWorkers and the difference not covered
+    val result = poly(Array[Int](0))
+
+    //  the remaining containers will be spreaded on all the array position(except the first)
+    val exceed: Int = result._2 % result._1.length //  containers in exceed to the spreading
+    val offset: Int = result._2 / result._1.length //  containers to be added on each position
+
+    Range(0, result._1.length).map {
+      case 0 => 0
+      case ind@1 => result._1(ind) + offset + exceed
+      case v => result._1(v) + offset
+    }.toArray
+
+  }
+}
+/**
+ * Policy similar to the Poly but using the Fibonacci series which is smoother
+ */
+case class Fibonacci() extends BlocksPolicy{
+
+  override def computeAllocationArray(maxWorkers: Int): Array[Int] = {
+    @tailrec
+    def create(value_1: Int, value_2: Int, result: Array[Int]): Array[Int] = {
+
+      val actual = value_1 + value_2
+      if( actual >= maxWorkers ) return result ++ Array[Int](maxWorkers)
+
+      create(actual, value_1, result ++ Array[Int](actual))
+    }
+    create(1, 0, Array[Int](0))
   }
 }

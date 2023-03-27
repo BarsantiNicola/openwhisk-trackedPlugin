@@ -25,7 +25,7 @@ import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 @RunWith(classOf[JUnitRunner])
-class SupervisorTest extends TestKit(ActorSystem("WatcherService"))
+class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   with FlatSpecLike
   with Matchers
   with MockFactory
