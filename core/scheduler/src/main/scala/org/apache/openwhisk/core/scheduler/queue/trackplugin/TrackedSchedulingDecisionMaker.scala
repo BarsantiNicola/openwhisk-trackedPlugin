@@ -1,5 +1,3 @@
-package org.apache.openwhisk.core.scheduler.queue.trackplugin
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -16,6 +14,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import org.apache.openwhisk.common.Logging

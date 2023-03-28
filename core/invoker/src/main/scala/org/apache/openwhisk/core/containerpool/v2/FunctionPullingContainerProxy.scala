@@ -17,29 +17,19 @@
 
 package org.apache.openwhisk.core.containerpool.v2
 
-import java.net.InetSocketAddress
-import java.time.Instant
 import akka.actor.Status.{Failure => FailureMessage}
-import akka.actor.{actorRef2Scala, ActorRef, ActorRefFactory, ActorSystem, FSM, Props, Stash}
+import akka.actor.{ActorRef, ActorRefFactory, ActorSystem, FSM, Props, Stash, actorRef2Scala}
 import akka.event.Logging.InfoLevel
 import akka.io.{IO, Tcp}
 import akka.pattern.pipe
+import org.apache.openwhisk.common._
 import org.apache.openwhisk.common.tracing.WhiskTracerProvider
-import org.apache.openwhisk.common.{LoggingMarkers, TransactionId, _}
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.ack.ActiveAck
-import org.apache.openwhisk.core.connector.{
-  ActivationMessage,
-  CombinedCompletionAndResultMessage,
-  CompletionMessage,
-  ResultMessage
-}
+import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletionAndResultMessage, CompletionMessage, ResultMessage}
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.containerpool.logging.LogCollectingException
-import org.apache.openwhisk.core.containerpool.v2.FunctionPullingContainerProxy.{
-  constructWhiskActivation,
-  containerName
-}
+import org.apache.openwhisk.core.containerpool.v2.FunctionPullingContainerProxy.{constructWhiskActivation, containerName}
 import org.apache.openwhisk.core.database._
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.core.entity.size._
@@ -51,13 +41,15 @@ import org.apache.openwhisk.core.scheduler.SchedulerEndpoints
 import org.apache.openwhisk.core.service.{RegisterData, UnregisterData}
 import org.apache.openwhisk.grpc.RescheduleResponse
 import org.apache.openwhisk.http.Messages
+import pureconfig.generic.auto._
 import pureconfig.loadConfigOrThrow
 import spray.json.DefaultJsonProtocol.{StringJsonFormat, _}
 import spray.json._
-import pureconfig.generic.auto._
 
-import scala.concurrent.duration._
+import java.net.InetSocketAddress
+import java.time.Instant
 import scala.concurrent.Future
+import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 // Events used internally
@@ -88,7 +80,7 @@ case class ResumeFailed(data: WarmData)
 case class RecreateClient(action: ExecutableWhiskAction)
 case object PingCache
 case class DetermineKeepContainer(attempt: Int)
-
+case object DropContainer
 // States
 sealed trait ProxyState
 case object LeaseStart extends ProxyState

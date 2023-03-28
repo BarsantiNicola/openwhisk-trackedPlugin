@@ -654,7 +654,10 @@ object ContainerMessage extends DefaultJsonProtocol {
       if (creation) {
         json.convertTo[ContainerCreationMessage]
       } else {
-        json.convertTo[ContainerDeletionMessage]
+        if( fields.contains("containers"))
+          json.convertTo[ContainersDeletionMessage]
+        else
+          json.convertTo[ContainerDeletionMessage]
       }
     }
   }

@@ -279,7 +279,6 @@ class FunctionPullingContainerPool(
       val oldRevision = deletionMessage.revision
       val invocationNamespace = deletionMessage.invocationNamespace
       val fqn = deletionMessage.action.copy(version = None)
-
       warmedPool.foreach(warmed => {
         val proxy = warmed._1
         val data = warmed._2
@@ -289,7 +288,8 @@ class FunctionPullingContainerPool(
             && data.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
             && data.revision <= oldRevision
             && container.compareTo(data.container.containerId.asString) == 0) {
-            proxy ! GracefulShutdown
+            logging.info( this, s"Shutting down ${data.container.containerId.asString}")
+            proxy ! DropContainer
           }
         }
       })
@@ -303,12 +303,16 @@ class FunctionPullingContainerPool(
                 && warmData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
                 && warmData.revision <= oldRevision
                 && container.compareTo(warmData.container.containerId.asString) == 0 =>
-              proxy ! GracefulShutdown
+              logging.info( this, s"Shutting down warm: ${warmData.container.containerId.asString}")
+              proxy ! DropContainer
+
             case initializedData: InitializedData
               if initializedData.invocationNamespace == invocationNamespace
                 && initializedData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
                 && container.compareTo(initializedData.container.containerId.asString) == 0 =>
-              proxy ! GracefulShutdown
+              logging.info( this, s"Shutting down init: ${initializedData.container.containerId.asString}")
+              proxy ! DropContainer
+
             case _ => // Other actions are ignored.
           }
         }

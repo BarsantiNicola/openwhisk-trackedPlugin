@@ -1,4 +1,21 @@
-package org.apache.openwhisk.core.containerpool.v2
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.openwhisk.core.containerpool.v2.trackplugin
 
 import akka.actor.Status.{Failure => FailureMessage}
 import akka.actor.{ActorRef, ActorRefFactory, ActorSystem, FSM, Props, Stash, actorRef2Scala}
@@ -13,6 +30,7 @@ import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletio
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.containerpool.logging.LogCollectingException
 import org.apache.openwhisk.core.containerpool.v2.FunctionPullingContainerProxy.{constructWhiskActivation, containerName}
+import org.apache.openwhisk.core.containerpool.v2.{Paused, Pausing, Remove, Removing, Running, Start, Uninitialized, _}
 import org.apache.openwhisk.core.database._
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.core.entity.size._
@@ -31,8 +49,8 @@ import spray.json._
 
 import java.net.InetSocketAddress
 import java.time.Instant
-import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
 class TrackedFunctionPullingContainerProxy(
@@ -58,7 +76,7 @@ class TrackedFunctionPullingContainerProxy(
   storeActivation: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
   collectLogs: LogsCollector,
   getLiveContainerCount: (String, FullyQualifiedEntityName, DocRevision) => Future[Long],
-  getWarmedContainerLimit: (String) => Future[(Int, FiniteDuration)],
+  getWarmedContainerLimit: String => Future[(Int, FiniteDuration)],
   instance: InvokerInstanceId,
   invokerHealthManager: ActorRef,
   poolConfig: ContainerPoolConfig,
@@ -69,12 +87,10 @@ class TrackedFunctionPullingContainerProxy(
     with Stash {
   startWith(Uninitialized, NonexistentData())
 
-  implicit val ec = actorSystem.dispatcher
+  implicit val ec: ExecutionContextExecutor = actorSystem.dispatcher
 
-  private val UnusedTimeoutName = "UnusedTimeout"
   private val unusedTimeout = timeoutConfig.pauseGrace
   private val IdleTimeoutName = "PausingTimeout"
-  private val idleTimeout = timeoutConfig.idleContainer
   private val KeepingTimeoutName = "KeepingTimeout"
   private val RunningActivationTimeoutName = "RunningActivationTimeout"
   private val runningActivationTimeout = 10.seconds
@@ -149,7 +165,7 @@ class TrackedFunctionPullingContainerProxy(
       goto(ContainerCreated) using completed
 
     // container creation failed
-    case Event(t: FailureMessage, _: NonexistentData) =>
+    case Event(_: FailureMessage, _: NonexistentData) =>
       context.parent ! ContainerRemoved(true)
       stop()
 
@@ -180,7 +196,7 @@ class TrackedFunctionPullingContainerProxy(
       goto(CreatingClient)
 
     case Event(Remove, data: PreWarmData) =>
-      cleanUp(data.container, None, false)
+      cleanUp(data.container, None, replacePrewarm = false)
 
     // prewarm container failed by health check
     case Event(_: FailureMessage, data: PreWarmData) =>
@@ -231,6 +247,11 @@ class TrackedFunctionPullingContainerProxy(
 
   // this is for first invocation, once the first invocation is over we are ready to trigger getActivation for action concurrency
   when(ClientCreated) {
+
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
     // 1. request activation message to client
     case Event(initializedData: InitializedData, _) =>
       context.parent ! Initialized(initializedData)
@@ -247,7 +268,7 @@ class TrackedFunctionPullingContainerProxy(
 
     // 3. request initialize and run command to container
     case Event(job: RunActivation, data: InitializedData) =>
-      implicit val transid = job.msg.transid
+      implicit val transid: TransactionId = job.msg.transid
       logging.debug(this, s"received RunActivation ${job.msg.activationId} for ${job.action} in $stateName")
 
       initializeAndRunActivation(data.container, data.clientProxy, job.action, job.msg, Some(job))
@@ -334,8 +355,12 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Rescheduling) {
 
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
     case Event(res: RescheduleResponse, data: ReschedulingData) =>
-      implicit val transId = data.resumeRun.msg.transid
+      implicit val transId: TransactionId = data.resumeRun.msg.transid
       if (!res.isRescheduled) {
         logging.warn(this, s"failed to reschedule the message ${data.resumeRun.msg.activationId}, clean up data")
         fallbackActivationForReschedulingData(data)
@@ -365,6 +390,11 @@ class TrackedFunctionPullingContainerProxy(
   }
 
   when(Running) {
+
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
     // Run was successful.
     // 1. request activation message to client
     case Event(activationResult: RunActivationCompleted, data: WarmData) =>
@@ -380,9 +410,8 @@ class TrackedFunctionPullingContainerProxy(
 
     // 3. request run command to container
     case Event(job: RunActivation, data: WarmData) =>
+      implicit val transid: TransactionId = job.msg.transid
       logging.debug(this, s"received RunActivation ${job.msg.activationId} for ${job.action} in $stateName")
-      implicit val transid = job.msg.transid
-
       initializeAndRunActivation(data.container, data.clientProxy, job.action, job.msg, Some(job))
         .map { activation =>
           RunActivationCompleted(data.container, job.action, activation.duration)
@@ -463,7 +492,7 @@ class TrackedFunctionPullingContainerProxy(
       if (runningActivations.isEmpty) {
         logging.info(this, s"The Client closed in state: $stateName, action: ${data.action}")
         // Stop ContainerProxy(ActivationClientProxy will stop also when send ClientClosed to ContainerProxy).
-        cleanUp(data.container, None, false)
+        cleanUp(data.container, None, replacePrewarm = false)
       } else {
         logging.info(
           this,
@@ -475,7 +504,7 @@ class TrackedFunctionPullingContainerProxy(
     // shutdown the client first and wait for any remaining activation to be executed
     // ContainerProxy will be terminated by StateTimeout if there is no further activation
     case Event(GracefulShutdown, data: WarmData) =>
-      logging.info(this, s"receive GracefulShutdown for action: ${data.action}")
+      logging.info(this, s"receive GracefulGracefulShutdown for action: ${data.action}")
       // clean up the etcd data first so that the scheduler can provision more containers in advance.
       dataManagementService ! UnregisterData(
         ContainerKeys.existingContainers(
@@ -493,6 +522,11 @@ class TrackedFunctionPullingContainerProxy(
   }
 
   when(Pausing) {
+
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
     case Event(ContainerPaused, data: WarmData) =>
       dataManagementService ! RegisterData(
         ContainerKeys.warmedContainers(
@@ -520,8 +554,14 @@ class TrackedFunctionPullingContainerProxy(
   }
 
   when(Paused) {
+
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
+      // Just send GracefulShutdown to ActivationClientProxy, make ActivationClientProxy throw ClientClosedException when fetchActivation next time.
     case Event(job: Initialize, data: WarmData) =>
-      implicit val transId = job.transId
+      implicit val transId: TransactionId = job.transId
       val parent = context.parent
       cancelTimer(IdleTimeoutName)
       cancelTimer(KeepingTimeoutName)
@@ -618,12 +658,12 @@ class TrackedFunctionPullingContainerProxy(
 
     // even if any error occurs, it still waits for ClientClosed event in order to be stopped after the client is closed.
     case Event(t: FailureMessage, _) =>
-      logging.error(this, s"unable to delete a container due to ${t}")
+      logging.error(this, s"unable to delete a container due to $t")
 
       stay
 
     case Event(StateTimeout, _) =>
-      logging.error(this, s"could not receive ClientClosed for ${unusedTimeout}, so just stop the container proxy.")
+      logging.error(this, s"could not receive ClientClosed for $unusedTimeout, so just stop the container proxy.")
 
       stop()
 
@@ -635,6 +675,28 @@ class TrackedFunctionPullingContainerProxy(
   }
 
   whenUnhandled {
+
+    case Event(DropContainer, _) =>
+      timedOut = true
+      stay
+
+    // shutdown the client first and wait for any remaining activation to be executed
+    // ContainerProxy will be terminated by StateTimeout if there is no further activation
+    case Event(GracefulShutdown, data: WarmData) =>
+      logging.info(this, s"receive GracefulGracefulShutdown for action: ${data.action}")
+      // clean up the etcd data first so that the scheduler can provision more containers in advance.
+      dataManagementService ! UnregisterData(
+        ContainerKeys.existingContainers(
+          data.invocationNamespace,
+          data.action.fullyQualifiedName(true),
+          data.action.rev,
+          Some(instance),
+          Some(data.container.containerId)))
+
+      // Just send GracefulShutdown to ActivationClientProxy, make ActivationClientProxy throw ClientClosedException when fetchActivation next time.
+      data.clientProxy ! GracefulShutdown
+
+      stay
     case Event(PingCache, data: WarmData) =>
       val actionId = data.action.fullyQualifiedName(false).toDocId.asDocInfo(data.revision)
       get(entityStore, actionId.id, actionId.rev, true, false).map(_ => {
@@ -676,7 +738,7 @@ class TrackedFunctionPullingContainerProxy(
   initialize()
 
   /** Delays all incoming messages until unstashAll() is called */
-  def delay = {
+  def delay: State = {
     stash()
     stay
   }
@@ -739,12 +801,12 @@ class TrackedFunctionPullingContainerProxy(
       .destroy()(TransactionId.invokerNanny)
       .andThen {
         case Failure(t) =>
-          logging.error(this, s"Failed to destroy container: ${container.containerId.asString} caused by ${t}")
+          logging.error(this, s"Failed to destroy container: ${container.containerId.asString} caused by $t")
       }
   }
 
   private def handleActivationMessage(msg: ActivationMessage, action: ExecutableWhiskAction): Future[RunActivation] = {
-    implicit val transid = msg.transid
+    implicit val transid: TransactionId = msg.transid
     logging.info(this, s"received a message ${msg.activationId} for ${msg.action} in $stateName")
     if (!namespaceBlacklist.isBlacklisted(msg.user)) {
       logging.debug(this, s"namespace ${msg.user.namespace.name} is not in the namespaceBlacklist")
@@ -827,7 +889,7 @@ class TrackedFunctionPullingContainerProxy(
       sendActiveAck(
         msg.transid,
         activation,
-        false,
+        blockingInvoke = false,
         msg.rootControllerIndex,
         msg.user.namespace.uuid,
         CombinedCompletionAndResultMessage(msg.transid, activation, instance))
@@ -839,7 +901,7 @@ class TrackedFunctionPullingContainerProxy(
 
   }
 
-  private def enableHealthPing(c: Container) = {
+  private def enableHealthPing(c: Container): Unit = {
     val hpa = healthPingActor.getOrElse {
       logging.info(this, s"creating health ping actor for ${c.addr.asString()}")
       val hp = context.actorOf(
@@ -851,7 +913,7 @@ class TrackedFunctionPullingContainerProxy(
     hpa ! HealthPingEnabled(true)
   }
 
-  private def disableHealthPing() = {
+  private def disableHealthPing(): Unit = {
     healthPingActor.foreach(_ ! HealthPingEnabled(false))
   }
 
@@ -880,7 +942,6 @@ class TrackedFunctionPullingContainerProxy(
    * 4. recording the result to the data store
    *
    * @param container the container to run the job on
-   * @param job the job to run
    * @return a future completing after logs have been collected and
    *         added to the WhiskActivation
    */
@@ -992,7 +1053,7 @@ class TrackedFunctionPullingContainerProxy(
               msg,
               None,
               Interval.zero,
-              false,
+              isTimeout = false,
               ExecutionResponse.whiskError(Messages.abnormalRun)))
       }
 
@@ -1136,14 +1197,14 @@ object TrackedFunctionPullingContainerProxy {
             store: (TransactionId, WhiskActivation, Boolean, UserContext) => Future[Any],
             collectLogs: LogsCollector,
             getLiveContainerCount: (String, FullyQualifiedEntityName, DocRevision) => Future[Long],
-            getWarmedContainerLimit: (String) => Future[(Int, FiniteDuration)],
+            getWarmedContainerLimit: String => Future[(Int, FiniteDuration)],
             instance: InvokerInstanceId,
             invokerHealthManager: ActorRef,
             poolConfig: ContainerPoolConfig,
             timeoutConfig: ContainerProxyTimeoutConfig,
             healthCheckConfig: ContainerProxyHealthCheckConfig =
               loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
-            tcp: Option[ActorRef] = None)(implicit actorSystem: ActorSystem, logging: Logging) =
+            tcp: Option[ActorRef] = None)(implicit actorSystem: ActorSystem, logging: Logging): Props =
     Props(
       new TrackedFunctionPullingContainerProxy(
         factory,
@@ -1179,14 +1240,14 @@ object TrackedFunctionPullingContainerProxy {
     val sanitizedPrefix = prefix.filter(isAllowed)
     val sanitizedSuffix = suffix.filter(isAllowed)
 
-    s"${ContainerFactory.containerNamePrefix(instance)}_${containerCount.next()}_${sanitizedPrefix}_${sanitizedSuffix}"
+    s"${ContainerFactory.containerNamePrefix(instance)}_${containerCount.next()}_${sanitizedPrefix}_$sanitizedSuffix"
   }
 
   /**
    * Creates a WhiskActivation ready to be sent via active ack.
    *
-   * @param job the job that was executed
-   * @param interval the time it took to execute the job
+   * @param action the job that was executed
+   * @param initInterval the time it took to execute the job
    * @param response the response to return to the user
    * @return a WhiskActivation to be sent to the user
    */
@@ -1195,7 +1256,7 @@ object TrackedFunctionPullingContainerProxy {
                                initInterval: Option[Interval],
                                totalInterval: Interval,
                                isTimeout: Boolean,
-                               response: ExecutionResponse) = {
+                               response: ExecutionResponse): WhiskActivation = {
 
     val causedBy = if (msg.causedBySequence) {
       Some(Parameters(WhiskActivation.causedByAnnotation, JsString(Exec.SEQUENCE)))

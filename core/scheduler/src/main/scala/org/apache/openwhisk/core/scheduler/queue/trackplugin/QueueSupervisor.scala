@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import org.apache.openwhisk.common.Logging
@@ -255,6 +271,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @return Returns three types of messages: AddContainer(num)[Add num containers], RemoveReadyContainers(num)[Remove num containers], SKip[do nothing]
    */
   def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String] ) : DecisionResults = {
+    logging.info(this, s"STATE: cont: ${containers.size} in: $incoming enq: $enqueued red: ${readyContainers.size}")
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
 
@@ -302,9 +319,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    *         DecisionResults(Skip,0) to do nothing
    */
   def delegate( snapshot: TrackQueueSnapshot ): DecisionResults = {
-    stateRegistry.publishUpdate(snapshot)
-    this.elaborate( snapshot.currentContainers, snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers)
 
+    stateRegistry.publishUpdate(snapshot)
+    logging.info(this, s"DELEGATE ${snapshot.readyContainers.toString}")
+    this.elaborate( snapshot.currentContainers, snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers)
   }
 
   /**

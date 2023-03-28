@@ -96,7 +96,7 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
         }
 
     case ContainersDeletion(containersToDrop, invocationNamespace, fqn, revision, whiskActionMetaData) =>
-      getInvokersWithOldContainer(invocationNamespace, fqn, revision)
+      getInvokers(invocationNamespace, fqn, revision)
         .map { invokers =>
           val msg = ContainersDeletionMessage(
             TransactionId.containerDeletion,
@@ -105,7 +105,7 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
             fqn,
             revision,
             whiskActionMetaData)
-          invokers.foreach(sendDeletionContainerToInvoker(messagingProducer, _, msg))
+          invokers.foreach(sendDeletionContainersToInvoker(messagingProducer, _, msg))
         }
 
     case rescheduling: ReschedulingCreationJob =>
@@ -245,6 +245,34 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
     }
   }
 
+  def getInvokers(invocationNamespace: String,
+                  fqn: FullyQualifiedEntityName,
+                  currentRevision: DocRevision): Future[List[Int]] = {
+    val namespacePrefix = containerPrefix(ContainerKeys.namespacePrefix, invocationNamespace, fqn)
+    val warmedPrefix = containerPrefix(ContainerKeys.warmedPrefix, invocationNamespace, fqn)
+
+    for {
+      existing <- etcdClient
+        .getPrefix(namespacePrefix)
+        .map { res =>
+          res.getKvsList.asScala.map { kv =>
+            parseExistingContainerKey(namespacePrefix, kv.getKey)
+          }
+        }
+      warmed <- etcdClient
+        .getPrefix(warmedPrefix)
+        .map { res =>
+          res.getKvsList.asScala.map { kv =>
+            parseWarmedContainerKey(warmedPrefix, kv.getKey)
+          }
+        }
+    } yield {
+      (existing ++ warmed)
+        .groupBy(k => k.invokerId) // remove duplicated value
+        .map(_._2.head.invokerId)
+        .toList
+    }
+  }
   /**
    * existingKey format: {tag}/namespace/{invocationNamespace}/{namespace}/({pkg}/)/{name}/{revision}/invoker{id}/container/{containerId}
    */
@@ -309,7 +337,7 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
     }
   }
 
-  private def sendDeletionContainerToInvoker(producer: MessageProducer,
+  private def sendDeletionContainersToInvoker(producer: MessageProducer,
                                              invoker: Int,
                                              msg: ContainersDeletionMessage): Future[ResultMetadata] = {
     implicit val transid: TransactionId = msg.transid

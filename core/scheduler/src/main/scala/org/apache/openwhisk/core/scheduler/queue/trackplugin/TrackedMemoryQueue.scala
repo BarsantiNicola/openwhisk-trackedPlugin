@@ -1,5 +1,3 @@
-package org.apache.openwhisk.core.scheduler.queue.trackplugin
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -16,6 +14,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import akka.actor.Status.{Failure => FailureMessage}
 import akka.actor.{ActorRef, ActorSystem, Cancellable, FSM, Props, Stash}
@@ -48,6 +47,7 @@ import java.time.{Duration, Instant}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
+import scala.collection.concurrent.TrieMap
 import scala.collection.immutable.Queue
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -141,7 +141,8 @@ class TrackedMemoryQueue(
   private var actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
-  private[queue] var onWorkIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
+  private[queue] var removableIds = TrieMap[String,Long]()
+
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
   private[queue] var in = new AtomicInteger(0)
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
@@ -150,7 +151,7 @@ class TrackedMemoryQueue(
   private[queue] var averageDurationBuffer = AverageRingBuffer(queueConfig.durationBufferSize)
   private[queue] var limit: Option[Int] = None
   private[queue] var initialized = false
-
+  private[queue] val removedIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private val logScheduler: Cancellable = context.system.scheduler.scheduleWithFixedDelay(0.seconds, 1.seconds) { () =>
     MetricEmitter.emitGaugeMetric(
       LoggingMarkers
@@ -296,6 +297,7 @@ class TrackedMemoryQueue(
 
     case Event(request: GetActivation, _) if request.action == action =>
       logging.info(this, "RAISED M")
+      removableIds.putIfAbsent(request.containerId, System.currentTimeMillis()+5000)
       sender ! GetActivationResponse(Left(NoActivationMessage()))
       stay
 
@@ -475,8 +477,10 @@ class TrackedMemoryQueue(
     case Event(request: GetActivation, _) if request.action == action =>
 
       implicit val tid: TransactionId = request.transactionId
-      logging.info(this, "RAISED AH")
+      logging.info(this, s"RAISED AH ${request.containerId}" )
+
       if (request.alive) {
+        removableIds.putIfAbsent(request.containerId, System.currentTimeMillis()+5000)
         containers += request.containerId
         handleActivationRequest(request)
       } else {
@@ -532,16 +536,21 @@ class TrackedMemoryQueue(
       cleanUpDataAndGotoRemoved()
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
-      logging.info(this, "RAISED AP")
-      val droppableContainers = requestBuffer.map { value => value.containerId }.toSet
+      logging.info(this, s"RAISED AP ${containersToDrop.toString()}")
+      val now = System.currentTimeMillis()
+      val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(value.containerId.indexOf("wsk")) }.toSet
+      var filteredContainers = Set[String]()
       containersToDrop.toList.foreach {
         containerId =>
           if (droppableContainers.contains(containerId)) {
             removeDeletedContainerFromRequestBuffer(containerId)
+            //removableIds.remove(containerId)
             containers -= containerId
+            filteredContainers += containerId
           }
       }
-      containerManager ! ContainersDeletion(containersToDrop, invocationNamespace, action, revision, actionMetaData)
+      if( filteredContainers.nonEmpty )
+        containerManager ! ContainersDeletion(filteredContainers, invocationNamespace, action, revision, actionMetaData)
       stay
 
   }
@@ -551,15 +560,19 @@ class TrackedMemoryQueue(
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
       logging.info(this, "RAISED AP")
-      val droppableContainers = requestBuffer.map{ value => value.containerId}.toSet
+      val now = System.currentTimeMillis()
+      val droppableContainers = requestBuffer.toList.map{ value => value.containerId.substring(value.containerId.indexOf("wsk"))}.toSet
+      var filteredContainers = Set[String]()
       containersToDrop.toList.foreach {
         containerId =>
           if(droppableContainers.contains( containerId )){
             removeDeletedContainerFromRequestBuffer(containerId)
+            //removableIds.remove(containerId)
             containers -= containerId
+            filteredContainers += containerId
           }
       }
-      containerManager ! ContainersDeletion(containersToDrop, invocationNamespace, action, revision, actionMetaData)
+      containerManager ! ContainersDeletion(filteredContainers, invocationNamespace, action, revision, actionMetaData)
       stay
 
     case Event(msg: ActivationMessage, _: NoActors) =>
@@ -584,6 +597,7 @@ class TrackedMemoryQueue(
       implicit val tid: TransactionId = request.transactionId
       logging.info(this, "RAISED AH")
       if (request.alive) {
+        removableIds.putIfAbsent(request.containerId, System.currentTimeMillis()+5000)
         containers += request.containerId
         handleActivationRequest(request)
       } else {
@@ -722,6 +736,7 @@ class TrackedMemoryQueue(
       logging.info(this, "RAISED AAL")
       implicit val tid = request.transactionId
       if (request.alive) {
+        removableIds.putIfAbsent(request.containerId, System.currentTimeMillis()+5000)
         containers += request.containerId
         handleActivationRequest(request)
       } else {
@@ -1137,7 +1152,7 @@ class TrackedMemoryQueue(
             in,
             queue.size,
             containers.toSet,
-            requestBuffer.toList.map{ request => request.containerId}.toSet,
+            requestBuffer.toList.map{ request => request.containerId.substring(request.containerId.indexOf("wsk"))}.toSet,
             creationIds.size,
             getStaleActivationNum(0, queue),
             namespaceContainerCount.existingContainerNumByNamespace,

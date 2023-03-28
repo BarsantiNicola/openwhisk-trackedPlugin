@@ -114,16 +114,17 @@ class ContainerMessageConsumer(
             sendAckToScheduler(creation.rootSchedulerIndex, ack)
             feed ! MessageFeed.Processed
         }
+
+      case Success(deletion: ContainersDeletionMessage) =>
+        implicit val transid: TransactionId = deletion.transid
+        logging.info(this, s"deletion message for ${deletion.containers.toString()} in ${deletion.invocationNamespace}/${deletion.action} is received")
+        containerPool ! DeletionContainers(deletion)
+        feed ! MessageFeed.Processed
+
       case Success(deletion: ContainerDeletionMessage) =>
         implicit val transid: TransactionId = deletion.transid
         logging.info(this, s"deletion message for ${deletion.invocationNamespace}/${deletion.action} is received")
         containerPool ! DeletionContainer(deletion)
-        feed ! MessageFeed.Processed
-
-      case Success(deletion: ContainersDeletionMessage) =>
-        implicit val transid: TransactionId = deletion.transid
-        logging.info(this, s"deletion message for ${deletion.containers.to} in ${deletion.invocationNamespace}/${deletion.action} is received")
-        containerPool ! DeletionContainers(deletion)
         feed ! MessageFeed.Processed
 
       case Failure(t) =>
