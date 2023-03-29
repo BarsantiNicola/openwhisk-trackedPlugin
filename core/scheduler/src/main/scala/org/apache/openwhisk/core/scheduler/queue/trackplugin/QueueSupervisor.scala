@@ -44,7 +44,7 @@ import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
  * @param action    name of the action assigned to the memoryQueue
  */
 
-class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig )(implicit val logging: Logging, val stateRegistry : StateRegistry ) {
+class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val stateRegistry : StateRegistry )(implicit val logging: Logging ) {
 
   // Containers control variables
   implicit var maxWorkers: Int = supervisorConfig.maxWorkers     //  maximum number of assignable containers to the action

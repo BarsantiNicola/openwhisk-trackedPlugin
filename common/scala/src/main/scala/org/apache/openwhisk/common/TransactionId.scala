@@ -17,17 +17,16 @@
 
 package org.apache.openwhisk.common
 
-import java.time.{Clock, Duration, Instant}
-
 import akka.event.Logging.{DebugLevel, InfoLevel, LogLevel, WarningLevel}
 import akka.http.scaladsl.model.headers.RawHeader
-import spray.json._
+import org.apache.openwhisk.common.WhiskInstants._
+import org.apache.openwhisk.common.tracing.WhiskTracerProvider
 import org.apache.openwhisk.core.ConfigKeys
 import pureconfig._
 import pureconfig.generic.auto._
-import org.apache.openwhisk.common.tracing.WhiskTracerProvider
-import org.apache.openwhisk.common.WhiskInstants._
+import spray.json._
 
+import java.time.{Clock, Duration, Instant}
 import scala.util.Try
 
 /**
@@ -250,6 +249,7 @@ object TransactionId {
   val actionHealthPing = TransactionId(systemPrefix + "actionHealth")
   var containerCreation = TransactionId(systemPrefix + "containerCreation")
   var containerDeletion = TransactionId(systemPrefix + "containerDeletion")
+  var containersDeletion = TransactionId(systemPrefix + "containersDeletion")
   val warmUp = TransactionId(systemPrefix + "warmUp")
 
   private val dict = ('A' to 'Z') ++ ('a' to 'z') ++ ('0' to '9')

@@ -40,13 +40,14 @@ import org.apache.openwhisk.core.etcd.{EtcdClient, EtcdConfig, EtcdWorker}
 import org.apache.openwhisk.core.scheduler.container.{ContainerManager, CreationJobManager}
 import org.apache.openwhisk.core.scheduler.grpc.ActivationServiceImpl
 import org.apache.openwhisk.core.scheduler.queue._
-import org.apache.openwhisk.core.scheduler.queue.trackplugin.{TrackedMemoryQueue, TrackedSchedulingDecisionMaker}
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{QueueSupervisor, StateRegistry, TrackedMemoryQueue, TrackedSchedulingDecisionMaker}
 import org.apache.openwhisk.core.service.{DataManagementService, LeaseKeepAliveService, WatcherService}
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.grpc.ActivationServiceHandler
 import org.apache.openwhisk.http.BasicHttpService
 import org.apache.openwhisk.spi.SpiLoader
 import org.apache.openwhisk.utils.ExecutionContextFactory
+import pureconfig.error.ConfigReaderException
 import pureconfig.generic.auto._
 import pureconfig.loadConfigOrThrow
 import spray.json.{DefaultJsonProtocol, _}
@@ -66,7 +67,10 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
   val msgProvider = SpiLoader.get[MessagingProvider]
   val producer = msgProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
 
-  private val supervisorConfig = loadConfigOrThrow[SchedulingSupervisorConfig](ConfigKeys.schedulerSupervisor)
+  private val supervisorConfig : Option[SchedulingSupervisorConfig] = try{ Option(loadConfigOrThrow[SchedulingSupervisorConfig](ConfigKeys.schedulerSupervisor))}catch{
+    case _: ConfigReaderException[_]=> None
+  }
+
   val maxPeek = loadConfigOrThrow[Int](ConfigKeys.schedulerMaxPeek)
   val etcdClient = EtcdClient(loadConfigOrThrow[EtcdConfig](ConfigKeys.etcd))
   val watcherService: ActorRef = actorSystem.actorOf(WatcherService.props(etcdClient))
@@ -196,55 +200,60 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
     : (ActorRefFactory, String, FullyQualifiedEntityName, DocRevision, WhiskActionMetaData) => ActorRef =
     (factory, invocationNamespace, fqn, revision, actionMetaData) => {
       // Todo: Change this to SPI
+      supervisorConfig match{
+        case Some(config) if config.enableSupervisor =>
 
-      val decisionMaker = if (supervisorConfig.enableSupervisor)
-        factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, watcherService, supervisorConfig)
-        (actorSystem, ec, logging,etcdClient))
-      else
-        factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
-
-      if( supervisorConfig.enableSupervisor)
-        factory.actorOf(
-          TrackedMemoryQueue.props(
-            supervisorConfig,
-            etcdClient,
-            durationChecker,
-            fqn,
-            producer,
-            schedulingConfig,
+          val stateRegistry = new StateRegistry(
             invocationNamespace,
-            revision,
-            schedulerEndpoints,
-            actionMetaData,
-            dataManagementService,
-            watcherService,
-            containerManager,
-            decisionMaker,
-            schedulerId: SchedulerInstanceId,
-            ack,
-            store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
-            getUserLimit: String => Future[Int]))
-      else
-        factory.actorOf(
-          MemoryQueue.props(
-            etcdClient,
-            durationChecker,
-            fqn,
-            producer,
-            schedulingConfig,
-            invocationNamespace,
-            revision,
-            schedulerEndpoints,
-            actionMetaData,
-            dataManagementService,
-            watcherService,
-            containerManager,
-            decisionMaker,
-            schedulerId: SchedulerInstanceId,
-            ack,
-            store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
-            getUserLimit: String => Future[Int]))
+            actionMetaData.name.name
+          )(watcherService, logging, actorSystem, etcdClient, ec)
 
+          val supervisor = new QueueSupervisor(invocationNamespace, actionMetaData.name.name, config, stateRegistry)
+
+          val decisionMaker = factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, supervisor))
+          factory.actorOf(
+            TrackedMemoryQueue.props(
+              supervisor,
+              etcdClient,
+              durationChecker,
+              fqn,
+              producer,
+              schedulingConfig,
+              invocationNamespace,
+              revision,
+              schedulerEndpoints,
+              actionMetaData,
+              dataManagementService,
+              watcherService,
+              containerManager,
+              decisionMaker,
+              schedulerId: SchedulerInstanceId,
+              ack,
+              store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
+              getUserLimit: String => Future[Int]))
+
+        case _ =>
+          val decisionMaker = factory.actorOf(SchedulingDecisionMaker.props(invocationNamespace, fqn, schedulingConfig))
+          factory.actorOf(
+            MemoryQueue.props(
+              etcdClient,
+              durationChecker,
+              fqn,
+              producer,
+              schedulingConfig,
+              invocationNamespace,
+              revision,
+              schedulerEndpoints,
+              actionMetaData,
+              dataManagementService,
+              watcherService,
+              containerManager,
+              decisionMaker,
+              schedulerId: SchedulerInstanceId,
+              ack,
+              store: (TransactionId, WhiskActivation, UserContext) => Future[Any],
+              getUserLimit: String => Future[Int]))
+      }
     }
 
   val topic = s"${Scheduler.topicPrefix}scheduler${schedulerId.asString}"

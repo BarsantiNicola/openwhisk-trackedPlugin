@@ -16,25 +16,19 @@
  */
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
-import akka.actor.{Actor, ActorRef, ActorSystem, Props}
+import akka.actor.{Actor, ActorSystem, Props}
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.entity.FullyQualifiedEntityName
-import org.apache.openwhisk.core.etcd.EtcdClient
-import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
 import org.apache.openwhisk.core.scheduler.queue._
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
-class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQualifiedEntityName, watcherService: ActorRef, supervisorConfig: SchedulingSupervisorConfig )
+class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQualifiedEntityName, supervisor: QueueSupervisor )
                                     (implicit val actorSystem: ActorSystem,
                                      ec: ExecutionContext,
-                                     logging: Logging,
-                                     etcdClient: EtcdClient)
+                                     logging: Logging)
   extends Actor {
-
-  private implicit val stateRegistry: StateRegistry = new StateRegistry( invocationNamespace, action.name.name )
-  private val supervisor = new QueueSupervisor( invocationNamespace, action.name.name, supervisorConfig )
 
   override def receive: Receive = {
     case msg: TrackQueueSnapshot =>
@@ -78,21 +72,16 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
 
       (stateName, averageDuration) match {
 
-        case (Running, _) =>
-          logging.info(this, s"Identified Running state, forcing to TrackedThrottled")
-          Future.successful(DecisionResults(EnableTrackedRun(supervisor), 0))
-
         // there is no container
-        case (TrackedRunning, None) if totalContainers == 0 && !initialized =>
+        case (Running, None) if totalContainers == 0 && !initialized =>
 
           logging.info(
             this,
             s"add one initial container if totalContainers($totalContainers) == 0 [$invocationNamespace:$action]")
           Future.successful(supervisor.initStrategy())
 
-        case (TrackedRunning, _) => Future.successful(supervisor.delegate(snapshot))
+        case (Running|Idle, _) => Future.successful(supervisor.delegate(snapshot))
 
-        case (TrackedIdle, _) => Future.successful(supervisor.delegate(snapshot))
         // do nothing
         case _ => Future.successful(DecisionResults(Skip, 0))
       }
@@ -101,12 +90,11 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
 }
 
 object TrackedSchedulingDecisionMaker {
-  def props(invocationNamespace: String, action: FullyQualifiedEntityName, watcherService: ActorRef, supervisorConfig: SchedulingSupervisorConfig)(
+  def props(invocationNamespace: String, action: FullyQualifiedEntityName, supervisor: QueueSupervisor)(
     implicit actorSystem: ActorSystem,
     ec: ExecutionContext,
-    logging: Logging,
-    etcdClient: EtcdClient
+    logging: Logging
   ): Props = {
-    Props(new TrackedSchedulingDecisionMaker(invocationNamespace, action, watcherService, supervisorConfig))
+    Props(new TrackedSchedulingDecisionMaker(invocationNamespace, action, supervisor))
   }
 }

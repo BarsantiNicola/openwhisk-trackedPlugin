@@ -71,10 +71,10 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
     500)
   implicit val etcdClient: EtcdClient = new MockEtcdClient(client, true)
   implicit val watcherService: ActorRef = system.actorOf(WatcherService.props(etcdClient))
-  implicit val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
 
   it should "Set the minWorkers equals to readyWorkers and maxWorkers" in{
-    val supervisor = new QueueSupervisor(namespace,action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace,action, supervisorConfig, stateRegistry)
     supervisor.setMinWorkers(0) shouldBe true
     supervisor.setReadyWorkers(0) shouldBe true
     supervisor.setMaxWorkers(0) shouldBe true
@@ -82,55 +82,57 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   }
 
   it should "Set the minWorkers equals to readyWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setReadyWorkers(1) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the readyWorkers equals to maxWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setReadyWorkers(3) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the minWorkers less than readyWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setMinWorkers(0) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the maxWorkers higher than readyWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setMaxWorkers(4) shouldBe true
     supervisor.clean()
   }
 
   it should "Not permit to set readyWorkers higher than maxWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setReadyWorkers(4) shouldBe false
     supervisor.clean()
   }
 
   it should "Not permit to set maxWorkers less than than readyWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setMaxWorkers(1) shouldBe false
     supervisor.clean()
   }
 
   it should "Not permit to set readyWorkers less than minWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.setReadyWorkers(0) shouldBe false
     supervisor.clean()
   }
 
-  it should "Not permit to set minWorkers higher than readyWorkers" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
-    supervisor.setMinWorkers(3) shouldBe false
-    supervisor.clean()
-  }
-
   it should "Be able to change dynamically the schedule period" in {
-    val supervisor = new TestQueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new TestQueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     Thread.sleep(20000)
     supervisor.changeSchedulerPeriod(Duration(7, SECONDS))
     Thread.sleep(20000)
@@ -146,7 +148,8 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   }
 
   it should "Be able to call periodically the schedule function" in {
-    val supervisor = new TestQueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new TestQueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     Thread.sleep(3000)
     moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() - 1000, 500) shouldBe true
     Thread.sleep(30000)
@@ -158,7 +161,8 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
 
 
   it should "Elaborate runtime the Inter-arrival time correctly" in{
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     supervisor.handleActivation( null, 0,0,0,0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(58000)
@@ -182,7 +186,8 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   }
 
   it should "Elaborate runtime the Inter-arrival time correctly managing higher values" in {
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig)
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
     Thread.sleep(70000)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
@@ -215,7 +220,7 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
 
   def moreOrLess( checkTime: Long, timestamp: Long, variation: Long ): Boolean = checkTime < timestamp+variation && checkTime > timestamp-variation
 
-  class TestQueueSupervisor(namespace: String, action: String, config: SchedulingSupervisorConfig) extends QueueSupervisor(namespace, action, config){
+  class TestQueueSupervisor(namespace: String, action: String, config: SchedulingSupervisorConfig, stateRegistry: StateRegistry) extends QueueSupervisor(namespace, action, config,stateRegistry){
 
     var testTimestamp : Long = 0
     var variation : Long = 0

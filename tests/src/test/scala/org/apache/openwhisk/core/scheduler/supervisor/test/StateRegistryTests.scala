@@ -28,12 +28,12 @@ import com.ibm.etcd.client.kv.WatchUpdate
 import com.ibm.etcd.client.{EtcdClient => Client}
 import common.StreamLogging
 import org.apache.openwhisk.core.etcd.EtcdClient
-import org.apache.openwhisk.core.scheduler.queue.trackplugin.{StateInformation, StateRegistry, TrackQueueSnapshot, TrackedRunning, UpdateForRenew}
+import org.apache.openwhisk.core.scheduler.queue.Running
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{StateInformation, StateRegistry, TrackQueueSnapshot, UpdateForRenew}
 import org.apache.openwhisk.core.service.{WatcherService, mockWatchUpdate}
 import org.junit.runner.RunWith
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.concurrent.ScalaFutures
-
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.{FlatSpecLike, Matchers}
 
@@ -68,9 +68,9 @@ extends TestKit(ActorSystem("WatcherService"))
   private val action = "test-action"
 
   logging.info(this, "TESTING SINGLE INSTANCE BEHAVIOR")
-  val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-  val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
-  val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, TrackedRunning, null)
+  val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
+  val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
+  val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
 
   //  TEST TO BE EXECUTED WITHOUT FORKED TASKS. StateRegistry operates on a singleton class which produces unpredictable results on the tests
   it should "Have a consistent initialization state" in{
