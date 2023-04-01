@@ -46,6 +46,7 @@ import org.apache.openwhisk.core.{ConfigKeys, WarmUp, WhiskConfig}
 import org.apache.openwhisk.grpc.{ActivationServiceClient, FetchRequest}
 import org.apache.openwhisk.spi.SpiLoader
 import pureconfig._
+import pureconfig.error.ConfigReaderException
 import pureconfig.generic.auto._
 
 import scala.collection.JavaConverters._
@@ -86,7 +87,11 @@ class FPCInvokerReactive(config: WhiskConfig,
   private val etcdClient = EtcdClient(loadConfigOrThrow[EtcdConfig](ConfigKeys.etcd))
 
   private val grpcConfig = loadConfigOrThrow[GrpcServiceConfig](ConfigKeys.schedulerGrpcService)
-  private val supervisorConfig = loadConfigOrThrow[ContainerPoolTrackedConfig](ConfigKeys.supervisorInvokerConfig)
+  private val supervisorConfig : Option[ContainerPoolTrackedConfig] = try {
+    Option(loadConfigOrThrow[ContainerPoolTrackedConfig](ConfigKeys.supervisorInvokerConfig))
+  } catch {
+    case _: ConfigReaderException[_] => None
+  }
   val watcherService: ActorRef = actorSystem.actorOf(WatcherService.props(etcdClient))
 
   private val leaseService =
@@ -296,8 +301,9 @@ class FPCInvokerReactive(config: WhiskConfig,
   /** Creates a ContainerProxy Actor when being called. */
   private val childFactory = (f: ActorRefFactory) => {
     implicit val transId = TransactionId.invokerNanny
-    if( supervisorConfig.enableSupervisor )
-      f.actorOf(
+
+    f.actorOf(supervisorConfig match{
+      case Some(config) if config.enableSupervisor =>
         TrackedFunctionPullingContainerProxy
           .props(
             containerFactory.createContainer,
@@ -314,10 +320,9 @@ class FPCInvokerReactive(config: WhiskConfig,
             instance,
             invokerHealthManager,
             poolConfig,
-            containerProxyTimeoutConfig))
-    else
-      f.actorOf(
-        FunctionPullingContainerProxy
+            containerProxyTimeoutConfig)
+    case _ =>
+      FunctionPullingContainerProxy
           .props(
             containerFactory.createContainer,
             entityStore,
@@ -333,7 +338,8 @@ class FPCInvokerReactive(config: WhiskConfig,
             instance,
             invokerHealthManager,
             poolConfig,
-            containerProxyTimeoutConfig))
+            containerProxyTimeoutConfig)
+    })
 
   }
 

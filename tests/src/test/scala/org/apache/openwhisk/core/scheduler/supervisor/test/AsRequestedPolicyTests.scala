@@ -112,7 +112,7 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
     supervisor.clean()
   }
 
-  it should "Manage containers using using maxWorkers and minWorkers" in {
+  it should "Manage containers using maxWorkers and minWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
     val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 2, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
     val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)

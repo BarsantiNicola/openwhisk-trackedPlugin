@@ -19,7 +19,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults}
+import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
@@ -62,6 +62,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private var schedulerPeriod: Duration = Duration(30, SECONDS) //  can be used to change runtime the period of scheduling
 
   //  Internal variables
+  private var maxAddingTime : Option[Long] = None
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
   private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = supervisorConfig.schedulePolicy match {
@@ -270,15 +271,17 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param enqueued   A value computed by the environment representing the number of enqueued requests
    * @return Returns three types of messages: AddContainer(num)[Add num containers], RemoveReadyContainers(num)[Remove num containers], SKip[do nothing]
    */
-  def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String] ) : DecisionResults = {
-    logging.info(this, s"STATE: cont: ${containers.size} in: $incoming enq: $enqueued red: ${readyContainers.size}")
+  def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String]) : DecisionResults = {
+
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
+    logging.info(this, s"[Framework-Analysis][$namespace/$action][State] 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}}")
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
 
     if( difference > 0 ){  //  if some containers are added means that some inProgress creation are terminated
 
+      maxAddingTime = None
       //  cannot happen just a check
       if( inProgressCreations.get() - difference  >= 0 ) {
         inProgressCreations.getAndAdd( (-1)*difference )
@@ -286,14 +289,29 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
         logging.error(this, s"[$namespace/$action] Error during container elaboration, too many containers are added to the system")
         inProgressCreations.set(0)
       }
+
+    }else{
+
+      //  we have some requests to create containers in elaboration
+      if( inProgressCreations.get() > 0 )
+        maxAddingTime match{  //  however too much time is passed without any container created
+          case Some(time: Long) if time < System.currentTimeMillis() => return DecisionResults(Pausing, 0)
+          case _ =>
+      }
     }
+
     snapshot = containers  //  make new snapshot for the next elaborate() call
     val inProgressCreationsCount = inProgressCreations.get()
 
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
-      case DecisionResults(AddContainer, value) => inProgressCreations.addAndGet(value); DecisionResults(AddContainer,value)
+      case DecisionResults(AddContainer, value) =>
+        inProgressCreations.addAndGet(value);
+        maxAddingTime = Option(System.currentTimeMillis()+60000)  // set a limit of 1m for the containers creation
+        DecisionResults(AddContainer,value)
       case value => value
     }
+
+
 
   }
 
@@ -321,8 +339,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def delegate( snapshot: TrackQueueSnapshot ): DecisionResults = {
 
     stateRegistry.publishUpdate(snapshot)
-    logging.info(this, s"DELEGATE ${snapshot.readyContainers.toString}")
-    this.elaborate( snapshot.currentContainers, snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers)
+    this.elaborate( snapshot.currentContainers.diff(snapshot.onRemoveContainers), snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers.diff(snapshot.onRemoveContainers))
   }
 
   /**

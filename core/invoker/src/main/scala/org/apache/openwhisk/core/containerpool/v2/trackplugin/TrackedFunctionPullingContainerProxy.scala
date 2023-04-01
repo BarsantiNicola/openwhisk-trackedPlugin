@@ -261,7 +261,6 @@ class TrackedFunctionPullingContainerProxy(
 
     // 2. read executable action data from db
     case Event(job: ActivationMessage, data: InitializedData) =>
-      timedOut = false
       handleActivationMessage(job, data.action)
         .pipeTo(self)
       stay() using data
@@ -403,7 +402,6 @@ class TrackedFunctionPullingContainerProxy(
 
     // 2. read executable action data from db
     case Event(job: ActivationMessage, data: WarmData) =>
-      timedOut = false
       handleActivationMessage(job, data.action)
         .pipeTo(self)
       stay() using data
@@ -553,11 +551,7 @@ class TrackedFunctionPullingContainerProxy(
     case x: Event if x.event != PingCache => delay
   }
 
-  when(Paused) {
-
-    case Event(DropContainer, _) =>
-      timedOut = true
-      stay
+  when(Paused, stateTimeout = 10.seconds) {
 
       // Just send GracefulShutdown to ActivationClientProxy, make ActivationClientProxy throw ClientClosedException when fetchActivation next time.
     case Event(job: Initialize, data: WarmData) =>

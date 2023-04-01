@@ -43,6 +43,7 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
         }
     case Clean =>
       supervisor.clean()
+      context.stop(self)
   }
 
   private[queue] def decide(snapshot: TrackQueueSnapshot) = {
@@ -50,6 +51,7 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
     initialized,
     _, _,
     existing,
+    _,
     _,
     inProgress,
     _, _, _,

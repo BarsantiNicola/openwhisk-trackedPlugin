@@ -45,7 +45,6 @@ import java.time.{Duration, Instant}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
-import scala.collection.concurrent.TrieMap
 import scala.collection.immutable.Queue
 import scala.collection.mutable
 import scala.concurrent.duration._
@@ -65,6 +64,7 @@ case class TrackQueueSnapshot(initialized: Boolean,
                          currentMsgCount: Int,
                          currentContainers: Set[String],
                          readyContainers: Set[String],
+                         onRemoveContainers: Set[String],
                          inProgressContainerCount: Int,
                          staleActivationNum: Int,
                          existingContainerCountInNamespace: Int,
@@ -78,7 +78,7 @@ case class TrackQueueSnapshot(initialized: Boolean,
 case object Clean extends RequiredAction   //  Message for cleaning the added testing environment on queue removing
 
 case class RemoveReadyContainer( containers : Set[String] ) extends RequiredAction
-
+case class CancelRemovable(id: String)
 
 class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
                   private val etcdClient: EtcdClient,
@@ -131,7 +131,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   private val actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
-  private[queue] var removableIds = TrieMap[String,Long]()
+  private[queue] var onRemoveIds: Set[String] = Set[String]()
 
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
   private[queue] var in = new AtomicInteger(0)
@@ -193,6 +193,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // this is the case that the action version is updated, so no data needs to be stored
     case Event(VersionUpdated, _) =>
+      logging.info(this, "RAISED B")
       val (schedulerActor, droppingActor) = startMonitoring()
       goto(Running) using RunningData(schedulerActor, droppingActor)
 
@@ -205,6 +206,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   when(Running, stateTimeout = queueConfig.idleGrace) {
 
     case Event(StateTimeout, data: RunningData) =>
+      logging.info(this, "RAISED C")
       if (queue.isEmpty && (containers.size + creationIds.size) <= 0) {
         logging.info(
           this,
@@ -223,19 +225,23 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(request: GetActivation, _) if request.action == action =>
 
       implicit val tid: TransactionId = request.transactionId
-      logging.info(this, s"RAISED AH ${request.containerId}")
+      logging.info(this, s"RAISED D ${request.containerId}")
 
       if (request.alive) {
-        removableIds.putIfAbsent(request.containerId, System.currentTimeMillis() + 5000)
-        containers += request.containerId
-        handleActivationRequest(request)
+        if( onRemoveIds.contains(request.containerId)){
+          sender ! GetActivationResponse(Left(NoActivationMessage()))
+          stay
+        }else {
+          containers += request.containerId
+          handleActivationRequest(request)
+        }
       } else {
         logging.info(this, s"Removing containerId:${request.containerId} because is no more alive")
         stay
       }
 
     case Event(msg: ActivationMessage, _) =>
-      logging.info(this, "RAISED AI")
+      logging.info(this, "RAISED E")
       if (supervisor.handleActivation(msg, containers.size, requestBuffer.size, queue.size, in.get()))
         handleActivationMessage(msg)
       else {
@@ -258,8 +264,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           else "developerError"}, reason: $message.")
 
         goto(Flushing) using FlushingData(schedulerActor, droppingActor, error, message)
-      } else
-      // if there are already some containers running, activations can be handled anyway.
+      } else // if there are already some containers running, activations can be handled anyway.
         stay
   }
 
@@ -268,6 +273,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // since there are already too many activation messages, it drops the new messages
     case Event(msg: ActivationMessage, ThrottledData(_, _)) =>
+      logging.info(this, "RAISED G")
       completeErrorActivation(msg, tooManyConcurrentRequests, isWhiskError = queueConfig.failThrottleAsWhiskError)
       stay
   }
@@ -277,18 +283,24 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(request: GetActivation, _: NoActors) if request.action == action =>
 
       implicit val tid: TransactionId = request.transactionId
-
+      logging.info(this, "RAISED H")
       if (request.alive) {
-        val (schedulerActor, droppingActor) = startMonitoring()
-        containers += request.containerId
-        handleActivationRequest(request)
-        goto(Running) using RunningData(schedulerActor, droppingActor)
+        if (onRemoveIds.contains(request.containerId)) {
+          sender ! GetActivationResponse(Left(NoActivationMessage()))
+          stay
+        }else {
+          val (schedulerActor, droppingActor) = startMonitoring()
+          containers += request.containerId
+          handleActivationRequest(request)
+          goto(Running) using RunningData(schedulerActor, droppingActor)
+        }
       } else {
         logging.info(this, s"Removing containerId:${request.containerId} because is no more alive")
         stay
       }
 
     case Event(msg: ActivationMessage, _: NoActors) =>
+      logging.info(this, "RAISED I")
       if( supervisor.handleActivation(msg,containers.size, requestBuffer.size, queue.size, in.get())) {
         val (schedulerActor, droppingActor) = startMonitoring()
         handleActivationMessage(msg)
@@ -297,18 +309,22 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         stay
 
     case Event(request: GetActivation, _) if request.action == action =>
+      logging.info(this, "RAISED L")
       sender ! GetActivationResponse(Left(NoActivationMessage()))
       stay
 
     case Event(StateTimeout, _: NoActors) =>
+      logging.info(this, "RAISED M")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] The queue is timed out, stop the queue.")
       cleanUpDataAndGotoRemoved()
 
     case Event(GracefulShutdown, _: NoActors) =>
+      logging.info(this, "RAISED N")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] Received GracefulShutdown, stop the queue.")
       cleanUpDataAndGotoRemoved()
 
     case Event(StopSchedulingAsOutdated, _: NoActors) =>
+      logging.info(this, "RAISED O")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] stop further scheduling.")
 
       cleanUpWatcher()
@@ -325,10 +341,12 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   when(Flushing) {
     // an initial container is successfully created.
     case Event(SuccessfulCreationJob(creationId, _, _, _), FlushingData(schedulerActor, droppingActor, _, _, _)) =>
+      logging.info(this, "RAISED P")
       creationIds -= creationId.asString
       goto(Running) using RunningData(schedulerActor, droppingActor)
 
     case Event(FailedCreationJob(creationId, _, _, _, e, message), data: FlushingData) =>
+      logging.info(this, "RAISED Q")
       e match {
         // delete queue when container creation fails with action limit invalid error
         case InvalidActionLimitError =>
@@ -339,6 +357,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           cleanUpActorsAndGotoRemoved(data)
 
         case _ =>
+          logging.info(this, "RAISED R")
           // log the failed information
           creationIds -= creationId.asString
           logging.info(
@@ -351,7 +370,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // since there is no container, activations cannot be handled.
     case Event(msg: ActivationMessage, data: FlushingData) =>
-
+      logging.info(this, "RAISED S")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] got a new activation message ${msg.activationId}")(
         msg.transid)
       val whiskError = isWhiskError(data.error)
@@ -364,6 +383,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     // Since SchedulingDecisionMaker keep sending a message to create a container, this state is not automatically timed out.
     // Instead, StateTimeout message will be sent by a timer.
     case Event(StateTimeout | DropOld, data: FlushingData) =>
+      logging.info(this, "RAISED T")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] Received StateTimeout, drop stale messages.")
       queue = MemoryQueue.dropOld(
         clock,
@@ -377,11 +397,13 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         cleanUpActorsAndGotoRemoved(data)
 
     case Event(GracefulShutdown, data: FlushingData) =>
+      logging.info(this, "RAISED U")
       completeAllActivations(data.reason, isWhiskError(data.error))
       logging.info(this, s"[$invocationNamespace:$action:$stateName] Received GracefulShutdown, stop the queue.")
       cleanUpActorsAndGotoRemoved(data)
 
     case Event(StopSchedulingAsOutdated, data: FlushingData) =>
+      logging.info(this, "RAISED V")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] stop further scheduling.")
       completeAllActivations(data.reason, isWhiskError(data.error))
       // let QueueManager know this queue is no longer in charge.
@@ -441,6 +463,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(QueueRemovedCompleted, _: NoData) =>
       logging.info(this, "RAISED AE")
       logging.info(this, "stop fsm")
+      decisionMaker ! Clean
       stop()
 
     // This is not supposed to happen. This will ensure the queue does not run forever.
@@ -448,7 +471,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(StateTimeout, _: NoData) =>
       logging.info(this, "RAISED AF")
       context.parent ! queueRemovedMsg
-
+      decisionMaker ! Clean
       stop()
 
     // This queue is going to stop, do nothing
@@ -463,24 +486,24 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   whenUnhandled {
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
-      logging.info(this, s"RAISED AP ${containersToDrop.toString()}")
+      logging.info(this, s"RAISED AH ${containersToDrop.toString()}")
       val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(value.containerId.indexOf("wsk")) }.toSet
-      var filteredContainers = Set[String]()
-      containersToDrop.toList.foreach {
-        containerId =>
-          if (droppableContainers.contains(containerId)) {
-            removeDeletedContainerFromRequestBuffer(containerId)
-            containers -= containerId
-            filteredContainers += containerId
-          }
-      }
-      if (filteredContainers.nonEmpty)
+      val filteredContainers = containersToDrop.intersect( droppableContainers)
+      if (filteredContainers.nonEmpty) {
         containerManager ! ContainersDeletion(filteredContainers, invocationNamespace, action, revision, actionMetaData)
+        filteredContainers.foreach{ containerId => removeDeletedContainerFromRequestBuffer(containerId)
+                                                   containers -= containerId
+                                                   onRemoveIds+=containerId
+                                                   actorSystem.scheduler.scheduleOnce(500.milliseconds) {self ! CancelRemovable(containerId)}}}
+      stay
+
+    case Event(CancelRemovable(id),_) =>
+      onRemoveIds -= id
       stay
 
     // The queue endpoint is removed, trying to restore it.
     case Event(WatchEndpointRemoved(_, `leaderKey`, value, false), data) =>
-      logging.info(this, "RAISED AZ")
+      logging.info(this, "RAISED AI")
       data match {
         case RemovingData(_, _, _) =>
           logging.info(
@@ -493,18 +516,18 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // we don't care the storage results for namespaceThrottlingKey
     case Event(InitialDataStorageResults(`namespaceThrottlingKey`, _), _) =>
-      logging.info(this, "RAISED AAA")
+      logging.info(this, "RAISED AL")
       stay
 
     // The queue endpoint is restored
     case Event(InitialDataStorageResults(`leaderKey`, Right(_)), _) =>
-      logging.info(this, "RAISED AAB")
+      logging.info(this, "RAISED AM")
       stay
 
     // this can be a case that there is another queue already running.
     // it can happen if a node is segregated by the temporal network rupture and the queue endpoint is removed.
     case Event(InitialDataStorageResults(`leaderKey`, Left(_)), data) =>
-      logging.info(this, "RAISED AAC")
+      logging.info(this, "RAISED AN")
       logging.warn(this, s"[$invocationNamespace:$action:$stateName] the queue is superseded by a new queue.")
       // let QueueManager know this queue is no longer in charge.
       context.parent ! queueRemovedMsg
@@ -519,7 +542,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       goto(Removed) using NoData()
 
     case Event(WatchEndpointRemoved(watchKey, key, _, true), _) =>
-      logging.info(this, "RAISED AAD")
+      logging.info(this, "RAISED AO")
       watchKey match {
         case `inProgressContainerPrefixKey` =>
           creationIds -= key.split("/").last
@@ -532,7 +555,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       stay
 
     case Event(WatchEndpointInserted(watchKey, key, _, true), _) =>
-      logging.info(this, "RAISED AAE")
+      logging.info(this, "RAISED AP")
       watchKey match {
         case `inProgressContainerPrefixKey` =>
           creationIds += key.split("/").last
@@ -544,13 +567,13 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // common case for Running, NamespaceThrottled, ActionThrottled
     case Event(SuccessfulCreationJob(creationId, _, _, _), _) =>
-      logging.info(this, "RAISED AAF")
+      logging.info(this, "RAISED AQ")
       creationIds -= creationId.asString
       stay()
 
     // for other cases
     case Event(FailedCreationJob(creationId, invocationNamespace, action, revision, _, message), _) =>
-      logging.info(this, "RAISED AAG")
+      logging.info(this, "RAISED AR")
       creationIds -= creationId.asString
       logging.info(
         this,
@@ -559,24 +582,31 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
     case Event(cancel: CancelPoll, _) =>
-      logging.info(this, "RAISED AAH")
+      logging.info(this, "RAISED AS")
       cancel.promise.trySuccess(Left(NoActivationMessage()))
 
       stay
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
     case Event(msg: ActivationMessage, _) =>
-      logging.info(this, "RAISED AAI")
-      handleActivationMessage(msg)
+      logging.info(this, "RAISED AT")
+      if( supervisor.handleActivation(msg,containers.size, requestBuffer.size, queue.size, in.get()))
+        handleActivationMessage(msg)
+      else
+        stay
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
     case Event(request: GetActivation, _) if request.action == action =>
       implicit val tid: TransactionId = request.transactionId
-      logging.info(this, "RAISED AAL")
+      logging.info(this, "RAISED AU")
       if (request.alive) {
-        removableIds.putIfAbsent(request.containerId, System.currentTimeMillis()+5000)
-        containers += request.containerId
-        handleActivationRequest(request)
+        if (onRemoveIds.contains(request.containerId)) {
+          sender ! GetActivationResponse(Left(NoActivationMessage()))
+          stay
+        }else {
+          containers += request.containerId
+          handleActivationRequest(request)
+        }
       } else {
         logging.info(this, s"Remove containerId because ${request.containerId} is not alive")
         removeDeletedContainerFromRequestBuffer(request.containerId)
@@ -588,14 +618,14 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
     case Event(request: GetActivation, _) if request.action != action =>
       implicit val tid: TransactionId = request.transactionId
-      logging.info(this, "RAISED AAM")
+      logging.info(this, "RAISED AV")
       logging.warn(this, s"[$invocationNamespace:$action:$stateName] version mismatch ${request.action}")
       sender ! GetActivationResponse(Left(ActionMismatch()))
 
       stay
 
     case Event(DropOld, _) =>
-      logging.info(this, "RAISED AAN")
+      logging.info(this, "RAISED AZ")
       if (queue.nonEmpty && Duration
         .between(queue.head.timestamp, clock.now())
         .compareTo(Duration.ofMillis(actionRetentionTimeout)) >= 0) {
@@ -617,7 +647,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // common case for all statuses
     case Event(GetState, _) =>
-      logging.info(this, "RAISED AAO")
+      logging.info(this, "RAISED AAA")
       sender ! StatusData(
         invocationNamespace,
         action.asString,
@@ -628,7 +658,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // Common case for all cases
     case Event(GracefulShutdown, data) =>
-      logging.info(this, "RAISED AAP")
+      logging.info(this, "RAISED AAB")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] Gracefully shutdown the memory queue.")
       // delete relative data, e.g leaderKey, namespaceThrottlingKey, actionThrottlingKey
       cleanUpData()
@@ -637,7 +667,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     // the version is updated. it's a shared case for all states
     case Event(StopSchedulingAsOutdated, data) =>
-      logging.info(this, "RAISED AAQ")
+      logging.info(this, "RAISED AAC")
       logging.info(this, s"[$invocationNamespace:$action:$stateName] stop further scheduling.")
       // let QueueManager know this queue is no longer in charge.
       context.parent ! staleQueueRemovedMsg
@@ -647,7 +677,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       goto(Removing) using getRemovingData(data, outdated = true)
 
     case Event(t: FailureMessage, _) =>
-      logging.info(this, "RAISED AAR")
+      logging.info(this, "RAISED AAD")
       logging.error(this, s"[$invocationNamespace:$action:$stateName] got an unexpected failure message: $t")
 
       stay
@@ -706,11 +736,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Uninitialized -> _ => unstashAll()
     case _ -> Flushing      => startTimerWithFixedDelay("StopQueue", StateTimeout, queueConfig.flushGrace)
     case Flushing -> _      => cancelTimer("StopQueue")
-    case _ -> Removed       =>
-      //  when the memoryQueue is going to be removed the control of our solution ends.
-      //  we remove the supervisor from the memoryQueue and start the cleaning of the SchedulingDecisionMaker
-      //  (notification on etcd, removing of supervisor/state-registry actors, removing of periodic triggers)
-      decisionMaker ! Clean
   }
 
   onTermination {
@@ -969,6 +994,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
             queue.size,
             containers.toSet,
             requestBuffer.toList.map{ request => request.containerId.substring(request.containerId.indexOf("wsk"))}.toSet,
+            onRemoveIds,
             creationIds.size,
             getStaleActivationNum(0, queue),
             namespaceContainerCount.existingContainerNumByNamespace,
