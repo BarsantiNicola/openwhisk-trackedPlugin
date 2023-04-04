@@ -56,12 +56,12 @@ class AsRequested() extends ContainerSchedulePolicy{
                        inCreationContainers: Int,
                        requestIar: Int,
                        enqueuedRequests: Int,
-                       incomingRequests: Int
+                       incoming: Int
                      ): DecisionResults = {
 
-    val readyCheck = readyContainers.size - math.max(incomingRequests, requestIar )-enqueuedRequests-readyWorkers
+    val readyCheck = readyContainers.size - requestIar -enqueuedRequests-readyWorkers
 
-    (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( math.max(incomingRequests, requestIar )+enqueuedRequests+readyWorkers, minWorkers)) match{
+    (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( requestIar +enqueuedRequests+readyWorkers, minWorkers)) match{
       case requiredContainers if requiredContainers > totalContainers+inCreationContainers => DecisionResults(AddContainer, requiredContainers-totalContainers-inCreationContainers)
       case requiredContainers if requiredContainers == totalContainers+inCreationContainers => DecisionResults(Skip,0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck > 0 => DecisionResults(RemoveReadyContainer(readyContainers.take(math.min(readyCheck, totalContainers+inCreationContainers-minWorkers))), 0)
@@ -102,7 +102,7 @@ case class Steps(stepSize: Int) extends AsRequested {
     if( inCreationContainers != 0 )
       return DecisionResults( Skip, 0 )
 
-    val systemFree = math.max(requestIar, incomingRequests) + enqueuedRequests == 0
+    val systemFree = requestIar + enqueuedRequests == 0
     def outsideScope(value: Int): Boolean = totalContainers +inCreationContainers - value == 0 ||
       totalContainers +inCreationContainers - value == math.max(readyWorkers,minWorkers)
 
@@ -174,7 +174,7 @@ abstract class BlocksPolicy extends ContainerSchedulePolicy {
       if (inCreationContainers != 0)
         return DecisionResults(Skip, 0)
 
-      val requestsToServe = math.max(requestIar, incomingRequests)+enqueuedRequests
+      val requestsToServe = requestIar +enqueuedRequests
       val offset = if( requestsToServe < math.max(minWorkers,readyWorkers) ) math.max(minWorkers, readyWorkers) else readyWorkers
       val requiredContainers = requestsToServe + offset
       val allocationArray = computeAllocationArray(maxWorkers)

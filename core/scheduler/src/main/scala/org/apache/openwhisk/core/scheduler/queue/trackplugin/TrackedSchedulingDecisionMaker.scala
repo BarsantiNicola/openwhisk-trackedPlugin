@@ -35,15 +35,11 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
       decide(msg)
         .andThen {
           case Success(DecisionResults(Skip, _)) =>
-          // do nothing
-          case Success(result: DecisionResults) =>
-            msg.recipient ! result
-          case Failure(e) =>
-            logging.error(this, s"failed to make a scheduling decision due to $e");
+          case Success(result: DecisionResults) => msg.recipient ! result
+          case Failure(e) => logging.error(this, s"failed to make a scheduling decision due to $e");
         }
-    case Clean =>
-      supervisor.clean()
-      context.stop(self)
+
+    case Clean => supervisor.clean()
   }
 
   private[queue] def decide(snapshot: TrackQueueSnapshot) = {
@@ -56,37 +52,27 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
     inProgress,
     _, _, _,
     averageDuration,
-    limit,
-    _,
+    _, _,
     stateName,
     _) = snapshot
 
     val totalContainers = existing.size + inProgress
-    if (limit <= 0) {
-      logging.info(this, s"Limit is behing 0: $limit" )
-      // this is an error case, the limit should be bigger than 0
-      stateName match {
-        case Flushing => Future.successful(DecisionResults(Skip, 0))
-        case _        => Future.successful(DecisionResults(Pausing, 0))
-      }
 
-    } else {
+    (stateName, averageDuration) match {
 
-      (stateName, averageDuration) match {
+      // we are in init state and no containers already given
+      case (Running, None) if totalContainers == 0 && !initialized =>
 
-        // there is no container
-        case (Running, None) if totalContainers == 0 && !initialized =>
-
-          logging.info(
+        logging.info(
             this,
             s"add one initial container if totalContainers($totalContainers) == 0 [$invocationNamespace:$action]")
-          Future.successful(supervisor.initStrategy())
+        Future.successful(supervisor.initStrategy())
 
-        case (Running|Idle, _) => Future.successful(supervisor.delegate(snapshot))
+      case (Running|Idle, _) => Future.successful(supervisor.delegate(snapshot))
 
-        // do nothing
-        case _ => Future.successful(DecisionResults(Skip, 0))
-      }
+      // do nothing
+      case _ => Future.successful(DecisionResults(Skip, 0))
+
     }
   }
 }

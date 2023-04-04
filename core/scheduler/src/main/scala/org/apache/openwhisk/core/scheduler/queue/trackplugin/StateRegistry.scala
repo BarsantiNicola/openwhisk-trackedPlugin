@@ -18,6 +18,7 @@
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
+import com.google.gson.Gson
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.service._
@@ -194,6 +195,7 @@ class StateRegistry(
       update = true                                               // setting the update flag
       lastUpdate = new Timestamp(updateReq.timestamp)             // updating the timestamp of the last change
       forwardUpdate(updateReq)                                    // writing the update on etcd
+      logging.info(this, s"[Framework-Analysis][Data][$namespace][$action] ${update.toString}")
       logging.info(this, s"[$schedulerId] Writing an update on etcd for $namespace-$action")
     }
   }
@@ -246,8 +248,8 @@ class StateRegistry(
     }
 
     etcdClient.put(s"whisk/$watcherName--$namespace--$action", value.toString).andThen {
-      case Success(_) => logging.info(this, s"[$schedulerId/$namespace/$action] Data for $namespace correctly stored on ETCD")
-      case Failure(e) => logging.info(this, s"Error during storage of namespace $namespace -> ${e.toString}")
+      case Success(_) => logging.info(this, s"[Framework-Analysis][Event] Data for $namespace/$action correctly stored on ETCD")
+      case Failure(e) => logging.error(this, s"[Framework-Analysis][Event] Error during storage of namespace $namespace -> ${e.toString}")
     }
   }
 }
@@ -382,6 +384,7 @@ object StateRegistry{
     //  we have to consider synchronization between StateRegistry instances
     share.synchronized {
       if( share.isEmpty ){
+        val gson : Gson = new Gson()
         this.registrationCounter.set(0)
         this.schedulerId = Option(scheduleId)
         this.watcherName = Option(s"information-receiver-$scheduleId")
@@ -393,6 +396,7 @@ object StateRegistry{
         //  whisk/information-receiver- is the prefix common to all the keys creates by the StateRegistry
         etcdClient.getPrefix(s"whisk/information-receiver-").map {
           result =>
+            logging.info(this, s"[Framework-Analysis][Data][$schedulerId] {'kind':'StateRegistryControlData', 'dim': ${gson.toJson(result).length}, 'timestamp': ${System.currentTimeMillis()} }")
             result.getKvsList.forEach {
                   //  key parsing => [0]= schedulerId, [1] = namespace, [2] = action
               key => val values = key.getKey.toString.replace("whisk/information-receiver-","").split("--")
@@ -463,6 +467,9 @@ class InformationReceiver(
                            implicit val ec : ExecutionContext
                          ) extends Actor{
 
+  private val gson : Gson = new Gson()
+  logging.info(this, s"[Framework-Analysis][Event] Connecting a new information receiver to ETCD for $schedulerId")
+
   //  creation of a watchEndpoint for receiving updates on key change
   //  we are using the prefix mode which permits to check a set of keys with a common prefix
   watcherService ! WatchEndpoint( "whisk/information-receiver-", "", isPrefix = true, schedulerId, Set(PutEvent,DeleteEvent))
@@ -473,6 +480,7 @@ class InformationReceiver(
       //  key parsing => [0]= schedulerId, [1] = namespace, [2] = action
       val parsedKey = req.key.replace("whisk/information-receiver-","").split("--")
       //  we receive updates also from ourself, so we accept only messages from other schedulers
+      logging.info(this, s"[Framework-Analysis][Data][$schedulerId] {'kind':'StateRegistryControlData', 'dim': ${gson.toJson(req).length}, 'timestamp': ${System.currentTimeMillis()} }")
       if ( parsedKey(0).compareTo(schedulerId) != 0 ) StateRegistry.addUpdate(
         parsedKey(1),
         parsedKey(2),
@@ -480,6 +488,7 @@ class InformationReceiver(
 
     //  a key has been removed(state-registry removal)
     case req: WatchEndpointRemoved =>
+      logging.info(this, s"[Framework-Analysis][Data][$schedulerId] {'kind':'StateRegistryControlData', 'dim': ${gson.toJson(req).length}, 'timestamp': ${System.currentTimeMillis()} }")
       //  key parsing => [0]= schedulerId, [1] = namespace, [2] = action
       val parsedKey = req.key.replace("whisk/information-receiver-","").split("--")
       //  we receive updates also from ourself, so we accept only messages from other schedulers

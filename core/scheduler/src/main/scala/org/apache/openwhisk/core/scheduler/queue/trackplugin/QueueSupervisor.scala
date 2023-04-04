@@ -275,7 +275,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
-    logging.info(this, s"[Framework-Analysis][$namespace/$action][State] 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}}")
+    logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'ContainerState', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
 
@@ -310,9 +310,6 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
         DecisionResults(AddContainer,value)
       case value => value
     }
-
-
-
   }
 
   /**

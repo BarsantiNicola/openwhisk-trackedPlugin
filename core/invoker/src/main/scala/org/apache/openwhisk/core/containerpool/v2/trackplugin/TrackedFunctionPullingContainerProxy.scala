@@ -1056,6 +1056,7 @@ class TrackedFunctionPullingContainerProxy(
     // possible for blocking activations so that dependent activations can be scheduled. The
     // completion message which frees a load balancer slot is sent after the active ack future
     // completes to ensure proper ordering.
+    logging.info(this, s"[Framework-Analysis][Measure] { 'event': 'activation_completed', 'activation_id': ${msg.activationId}, 'time': ${System.currentTimeMillis()}}")
     val sendResult = if (msg.blocking) {
       activation.map { result =>
         val ackMsg =
