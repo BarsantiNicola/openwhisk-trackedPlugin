@@ -40,7 +40,6 @@ import org.scalatest.{FlatSpecLike, Matchers}
 import java.lang
 import java.util.concurrent.{Executor, TimeUnit}
 import scala.annotation.tailrec
-import scala.collection.immutable.Set
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.Random
 
@@ -175,9 +174,9 @@ class StepsPolicyTests extends TestKit(ActorSystem("WatcherService"))
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(Set("A","B"), parameters._2, parameters._3+1, Set("A","B")) shouldBe DecisionResults(AddContainer, 2)
-    supervisor.elaborate(Set("A","B","C","D"), parameters._2+1, parameters._3, Set("A","B","C","D")) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(Set("A","B","C","D"), parameters._2+2, parameters._3, Set("A","B","C")) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(Set("A","B","C","D"), parameters._2+1, parameters._3, Set("A","B","C","D")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B","C","D"), parameters._2, parameters._3+1, Set("A","B","C","D")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B","C","D"), parameters._2, parameters._3+1, Set("A","B","C")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A","B","C","D"), parameters._2, parameters._3+1, Set("A","B","C","D")) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(Set("A","B","C","D"), parameters._2, parameters._3, Set("A","B","C","D")) shouldBe DecisionResults(RemoveReadyContainer(Set("A","B")), 0)
     supervisor.elaborate(Set("C","D"), parameters._2, parameters._3, Set("C","D")) shouldBe DecisionResults(Skip, 0)
   }

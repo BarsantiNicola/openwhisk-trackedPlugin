@@ -140,9 +140,9 @@ with StreamLogging  {
 
     //  the difference between the readyWorkers and minWorkers variables is that it has to add new containers if containers are used
     //  5 readyWorkers to be granted, 5 containers but 1 used => only 4 readyWorkers => should add the next block of containers(9 but only 5 givable for maxWorkers)
-    supervisor.elaborate(Set("A", "B", "C", "D", "E"), parameters._2 + 1, parameters._3, Set("A", "B", "C", "D", "E")) shouldBe DecisionResults(AddContainer, 5)
-    supervisor.elaborate(Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L"), parameters._2 + 2, parameters._3, Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L")) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L"), parameters._2 + 1, parameters._3, Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A", "B", "C", "D", "E"), parameters._2, parameters._3+1, Set("A", "B", "C", "D", "E")) shouldBe DecisionResults(AddContainer, 5)
+    supervisor.elaborate(Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L"), parameters._2, parameters._3+2, Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L")) shouldBe DecisionResults(Skip, 0)
+    supervisor.elaborate(Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L"), parameters._2 , parameters._3+1, Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L")) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L"), parameters._2, parameters._3, Set("A", "B", "C", "D", "E", "F", "G", "H", "I", "L")) shouldBe DecisionResults(RemoveReadyContainer(Set("E", "F", "A", "I", "G")), 0)
     supervisor.elaborate(Set("A", "B", "C", "D", "E"), parameters._2, parameters._3, Set("B", "C", "D", "H", "L")) shouldBe DecisionResults(Skip, 0)
   }
