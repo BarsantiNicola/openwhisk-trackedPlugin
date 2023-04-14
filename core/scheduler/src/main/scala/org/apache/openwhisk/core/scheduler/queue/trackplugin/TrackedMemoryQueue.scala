@@ -138,7 +138,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
   private[queue] val namespaceContainerCount = NamespaceContainerCount(invocationNamespace, etcdClient, watcherService)
   private[queue] var averageDuration: Option[Double] = None
-  private[queue] var averageDurationBuffer = AverageRingBuffer(queueConfig.durationBufferSize)
+  private[queue] var averageDurationBuffer = SimpleAverageRingBuffer(queueConfig.durationBufferSize)
   private[queue] var limit: Option[Int] = None
   private[queue] var initialized = false
 
@@ -452,6 +452,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(StateTimeout, _: NoData) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] QueueManager doesn't respond. Forcing memory queue removal")
       context.parent ! queueRemovedMsg
+      decisionMaker ! Clean
       stop()
 
     // This queue is going to stop, do nothing
@@ -1034,7 +1035,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   }
 
   private def handleActivationMessage(msg: ActivationMessage) = {
-    logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': $invocationNamespace, 'action': ${action.name.name}, 'state': $stateName, 'event': 'activation_arrived', 'activation_id': ${msg.activationId}, 'time': ${System.currentTimeMillis()}}")
+    logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': '$invocationNamespace', 'action': '${action.name.name}', 'state': '$stateName', 'event': 'activation_arrived', 'activation_id': '${msg.activationId}', 'time': ${System.currentTimeMillis()}}")
 
     in.incrementAndGet()
     takeUncompletedRequest()

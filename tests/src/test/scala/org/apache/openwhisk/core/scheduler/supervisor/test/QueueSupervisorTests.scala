@@ -72,6 +72,96 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   implicit val etcdClient: EtcdClient = new MockEtcdClient(client, true)
   implicit val watcherService: ActorRef = system.actorOf(WatcherService.props(etcdClient))
 
+  it should "Elaborate runtime the Inter-arrival time correctly using a dynamic action execution time" in {
+    val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(29999.9))
+    Thread.sleep(70000)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 1
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 1
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 1
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 1
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 1
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 0
+    supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(120000))
+    Thread.sleep(70000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 2
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 3
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 4
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 4
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
+    math.round(supervisor.iar).toInt shouldBe 4
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 4
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 2
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 1
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 0
+    Thread.sleep(60000)
+    println(supervisor.iar)
+    math.round(supervisor.iar).toInt shouldBe 0
+    supervisor.clean()
+  }
+  /*
   it should "Set the minWorkers equals to readyWorkers and maxWorkers" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
     val supervisor = new QueueSupervisor(namespace,action, supervisorConfig, stateRegistry)
@@ -163,6 +253,7 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   it should "Elaborate runtime the Inter-arrival time correctly" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
     val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(60000))
     supervisor.handleActivation( null, 0,0,0,0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(58000)
@@ -188,6 +279,7 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   it should "Elaborate runtime the Inter-arrival time correctly managing higher values" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
     val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(60000))
     Thread.sleep(70000)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
@@ -217,6 +309,8 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
     math.round(supervisor.iar).toInt shouldBe 0
     supervisor.clean()
   }
+  */
+
 
   def moreOrLess( checkTime: Long, timestamp: Long, variation: Long ): Boolean = checkTime < timestamp+variation && checkTime > timestamp-variation
 

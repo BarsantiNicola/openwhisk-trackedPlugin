@@ -19,7 +19,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing}
+import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing, Running, Skip}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
@@ -62,7 +62,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private var schedulerPeriod: Duration = Duration(30, SECONDS) //  can be used to change runtime the period of scheduling
 
   //  Internal variables
-  private var maxAddingTime : Option[Long] = None
+  private var maxAddingTime : Option[Long] = None  //  time used to identify an error(system unable to satisfy the containers creations)
+  private var executionTime : Option[Double] = None  // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
+  private val creationTme : Double = 500  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
   private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = supervisorConfig.schedulePolicy match {
@@ -83,7 +86,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   //  periodic estimation of inter-arrival rate of requests
   metricsTimer.scheduleAtFixedRate( new TimerTask { //  chosen fixed rate to have more precise rate estimations
-          def run(): Unit =  iar = ( iar + acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/2
+          def run(): Unit =  executionTime match{
+            case Some(value:Double) if value > 0 => iar = ( iar + (acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/value)/2
+            case _ => iar = 0
+          }
         }, 1000, 60000 )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
@@ -271,8 +277,12 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param enqueued   A value computed by the environment representing the number of enqueued requests
    * @return Returns three types of messages: AddContainer(num)[Add num containers], RemoveReadyContainers(num)[Remove num containers], SKip[do nothing]
    */
-  def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String]) : DecisionResults = {
+  def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String], et: Option[Double]) : DecisionResults = {
 
+    executionTime = et match{
+      case Some(value:Double) => Option(60000/value)
+      case _ => Option(60000/creationTme)
+    }
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
     logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'ContainerState', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
@@ -295,7 +305,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       //  we have some requests to create containers in elaboration
       if( inProgressCreations.get() > 0 )
         maxAddingTime match{  //  however too much time is passed without any container created
-          case Some(time: Long) if time < System.currentTimeMillis() => return DecisionResults(Pausing, 0)
+          case Some(time: Long) if time < System.currentTimeMillis() && containers.isEmpty => return DecisionResults(Pausing, 0)
           case _ =>
       }
     }
@@ -336,7 +346,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def delegate( snapshot: TrackQueueSnapshot ): DecisionResults = {
 
     stateRegistry.publishUpdate(snapshot)
-    this.elaborate( snapshot.currentContainers.diff(snapshot.onRemoveContainers), snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers.diff(snapshot.onRemoveContainers))
+    this.elaborate( snapshot.currentContainers.diff(snapshot.onRemoveContainers), snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers.diff(snapshot.onRemoveContainers), snapshot.averageDuration)
   }
 
   /**

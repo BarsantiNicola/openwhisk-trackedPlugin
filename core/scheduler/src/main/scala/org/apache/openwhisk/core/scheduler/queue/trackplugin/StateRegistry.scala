@@ -195,7 +195,7 @@ class StateRegistry(
       update = true                                               // setting the update flag
       lastUpdate = new Timestamp(updateReq.timestamp)             // updating the timestamp of the last change
       forwardUpdate(updateReq)                                    // writing the update on etcd
-      logging.info(this, s"[Framework-Analysis][Data][$namespace][$action] ${update.toString}")
+      logging.info(this, s"[Framework-Analysis][Data][$namespace][$action] ${updateReq.toString}")
       logging.info(this, s"[$schedulerId] Writing an update on etcd for $namespace-$action")
     }
   }
