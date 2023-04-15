@@ -19,7 +19,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing, Running, Skip}
+import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
