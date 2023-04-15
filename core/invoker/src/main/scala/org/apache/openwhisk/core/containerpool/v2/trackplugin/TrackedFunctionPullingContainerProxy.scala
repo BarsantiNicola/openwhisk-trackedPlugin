@@ -145,6 +145,7 @@ class TrackedFunctionPullingContainerProxy(
               job.rpcPort,
               container.containerId)) match {
             case Success(clientProxy) =>
+              timedOut = false
               InitializedData(container, job.invocationNamespace, job.action, clientProxy)
             case Failure(t) =>
               logging.error(this, s"failed to create activation client caused by: $t")
@@ -185,6 +186,7 @@ class TrackedFunctionPullingContainerProxy(
           job.rpcPort,
           data.container.containerId)) match {
         case Success(proxy) =>
+          timedOut = false
           InitializedData(data.container, job.invocationNamespace, job.action, proxy)
         case Failure(t) =>
           logging.error(this, s"failed to create activation client for ${job.action} caused by: $t")
@@ -248,8 +250,14 @@ class TrackedFunctionPullingContainerProxy(
   // this is for first invocation, once the first invocation is over we are ready to trigger getActivation for action concurrency
   when(ClientCreated) {
 
-    case Event(DropContainer, _) =>
+    case Event(DropContainer, data: InitializedData) =>
       timedOut = true
+      cleanUp(
+        data.container,
+        data.invocationNamespace,
+        data.action.fullyQualifiedName(withVersion = true),
+        data.action.rev,
+        Some(data.clientProxy))
       stay
 
     // 1. request activation message to client
@@ -354,9 +362,10 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Rescheduling) {
 
-    case Event(DropContainer, _) =>
+    case Event(DropContainer, data: ReschedulingData) =>
       timedOut = true
-      stay
+      data.container.suspend()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
+      goto(Pausing)
 
     case Event(res: RescheduleResponse, data: ReschedulingData) =>
       implicit val transId: TransactionId = data.resumeRun.msg.transid
@@ -390,9 +399,10 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Running) {
 
-    case Event(DropContainer, _) =>
+    case Event(DropContainer, data: WarmData) =>
       timedOut = true
-      stay
+      data.container.suspend()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
+      goto(Pausing)
 
     // Run was successful.
     // 1. request activation message to client
@@ -560,6 +570,7 @@ class TrackedFunctionPullingContainerProxy(
       cancelTimer(IdleTimeoutName)
       cancelTimer(KeepingTimeoutName)
       cancelTimer(DetermineKeepContainer.toString)
+      timedOut = false
       data.container
         .resume()
         .map { _ =>
@@ -573,7 +584,7 @@ class TrackedFunctionPullingContainerProxy(
           // since akka port will no be used, we can put any value except 0 here
           data.clientProxy ! RequestActivation(
             newScheduler = Some(SchedulerEndpoints(job.schedulerHost, job.rpcPort, 10)))
-          timedOut = false
+
         }
         .recover {
           case t: Throwable =>
@@ -591,6 +602,7 @@ class TrackedFunctionPullingContainerProxy(
           instance,
           data.container.containerId))
       goto(Running)
+
     case Event(StateTimeout, _: WarmData) =>
       self ! DetermineKeepContainer(0)
       stay

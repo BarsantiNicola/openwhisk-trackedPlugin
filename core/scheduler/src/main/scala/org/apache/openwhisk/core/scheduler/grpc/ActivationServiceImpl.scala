@@ -87,7 +87,7 @@ class ActivationServiceImpl()(implicit actorSystem: ActorSystem, logging: Loggin
               }
               .recover {
                 case t: Throwable =>
-                  logging.error(
+                  logging.warn(
                     this,
                     s"Failed to get message from QueueManager container: ${request.containerId}, fqn: ${request.fqn}, rev: ${request.rev}, alive: ${request.alive}, lastDuration: ${request.lastDuration}, error: ${t.getMessage}")
                   FetchResponse(ActivationResponse(Left(NoActivationMessage())).serialize)

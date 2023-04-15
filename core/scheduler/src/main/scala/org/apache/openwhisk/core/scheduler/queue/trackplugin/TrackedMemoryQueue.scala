@@ -477,6 +477,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     case Event(CancelRemovable(id),_) =>
       onRemoveIds -= id
+      removeDeletedContainerFromRequestBuffer(id)
       stay
 
     // The queue endpoint is removed, trying to restore it.
