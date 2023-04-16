@@ -306,7 +306,7 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   class MockStateRegistry(namespace: String, action: String) extends StateRegistry(namespace,action){
 
-    override def publishUpdate(value: TrackQueueSnapshot): Unit = {
+    override def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String ): Unit = {
     }
 
     override def clean(): Unit = {}

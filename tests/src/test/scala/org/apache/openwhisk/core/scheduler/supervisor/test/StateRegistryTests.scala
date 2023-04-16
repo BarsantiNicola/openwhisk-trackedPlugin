@@ -98,7 +98,7 @@ extends TestKit(ActorSystem("WatcherService"))
   it should "Add a first update and notify it" in {
     val stateRegistry = new StateRegistry(namespace, action)
     val prevTime = stateRegistry.getUpdateStatus.lastUpdate
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     val localValue = stateRegistry.getUpdateStatus
     val equivState = new StateInformation(snapshot)
     equivState.timestamp = localValue.lastUpdate.getTime+1
@@ -112,7 +112,7 @@ extends TestKit(ActorSystem("WatcherService"))
 
   it should "Remove an update already stored" in {
     val stateRegistry = new StateRegistry(namespace, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot, 0,0,0,0,"","")
     stateRegistry.clean()
     val localValue = stateRegistry.getUpdateStatus
     localValue.update shouldBe false
@@ -123,7 +123,7 @@ extends TestKit(ActorSystem("WatcherService"))
 
   it should "Reset the local status after a state extraction" in{
     val stateRegistry = new StateRegistry(namespace, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     stateRegistry.getStates
     val localValue = stateRegistry.getUpdateStatus
     localValue.update shouldBe false
@@ -132,11 +132,11 @@ extends TestKit(ActorSystem("WatcherService"))
 
   it should "Add a new fresh update and notify it" in {
     val stateRegistry = new StateRegistry(namespace, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     val prevValue = stateRegistry.getUpdateStatus
     Thread.sleep(50)
     stateRegistry.getStates
-    stateRegistry.publishUpdate(snapshot2)
+    stateRegistry.publishUpdate(snapshot2,0,0,0,0,"","")
     val localValue = stateRegistry.getUpdateStatus
     localValue.update shouldBe true
     localValue.lastUpdate.after(prevValue.lastUpdate) shouldBe true
@@ -152,7 +152,7 @@ extends TestKit(ActorSystem("WatcherService"))
     val stateRegistry = new StateRegistry(namespace, action)
     val testUpdate = new StateInformation(snapshot2)
     Thread.sleep(50)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     StateRegistry.addUpdate( namespace, action, testUpdate) shouldBe false
     stateRegistry.getUpdateStatus.update shouldBe true
     StateRegistry.getUpdateStatus(namespace,action).update shouldBe false
@@ -165,11 +165,11 @@ extends TestKit(ActorSystem("WatcherService"))
 
   it should "Not add duplicated updates but refreshing the local timestamp" in{
     val stateRegistry = new StateRegistry(namespace, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     val time = stateRegistry.getUpdateStatus.lastUpdate
     Thread.sleep(100)
     stateRegistry.getStates
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     val update = stateRegistry.getUpdateStatus
     update.update shouldBe false
     update.lastUpdate.after(time) shouldBe false
@@ -204,7 +204,7 @@ extends TestKit(ActorSystem("WatcherService"))
     val stateRegistry = new StateRegistry(namespace, action)
     val stateRegistry2 = new StateRegistry(namespace2, action)
     val prevTime = stateRegistry2.getUpdateStatus.lastUpdate
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     val localValue = stateRegistry2.getUpdateStatus
     val globalValue = StateRegistry.getUpdateStatus(namespace, action)
     val globalValue2 = StateRegistry.getUpdateStatus(namespace2, action)
@@ -229,7 +229,7 @@ extends TestKit(ActorSystem("WatcherService"))
     stateRegistry2.getUpdateStatus.update shouldBe false
     stateRegistry = new StateRegistry(namespace, action)
     stateRegistry2.getUpdateStatus.update shouldBe false
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
     stateRegistry2.getStates
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
@@ -241,7 +241,7 @@ extends TestKit(ActorSystem("WatcherService"))
   it should "Removal of an update should be notified to others StateRegistry instances" in{
     val stateRegistry = new StateRegistry(namespace, action)
     val stateRegistry2 = new StateRegistry(namespace2, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
     stateRegistry2.getStates
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe false
@@ -253,7 +253,7 @@ extends TestKit(ActorSystem("WatcherService"))
   it should "Reset the local status after a state extraction only on the given instance" in {
     val stateRegistry = new StateRegistry(namespace, action)
     val stateRegistry2 = new StateRegistry(namespace2, action)
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot,0,0,0,0,"","")
     StateRegistry.getUpdateStatus(namespace, action).update shouldBe false
     StateRegistry.getUpdateStatus(namespace2, action).update shouldBe true
     stateRegistry.getStates

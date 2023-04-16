@@ -42,55 +42,71 @@ case class UpdateState( update: Boolean, lastUpdate: Timestamp )
 /**
  * class for storing queue information. It is just a reduction of the QueueSnapshot to not include global information
  * like existingContainerCount or inProgressContainerCount(only local are needed)
- * @param initialized : Boolean: defines if the memoryQueue is initialized
  * @param incomingMsgCount : Int : defines the number of incoming message for the namespace
  * @param currentMsgCount : Int : defines the number of messages currently enqueued
  * @param staleActivationNum Int : containers not working
  * @param existingContainerCountInNamespace : Int: total containers associated to the namespace
  * @param inProgressContainerCountInNamespace : Int: total containers in the namespace which are ending the last creation part
  * @param averageDuration : Int : mean time of an action execution
- * @param limit : Int : maximum number of activations in the queue
  * @param stateName : Int : current state of the MemoryQueue
  * @param timestamp: Long : time instant associated to the information. I used a Long, cause Timestamp gives problem to openwhisk
+ * @param iar: Int: inter-arrival time of requests for the action rounded to be an integer
+ * @param maxWorkers: Int: max number of workers set into QueueSupervisor
+ * @param minWorkers: Int : min number of workers set into QueueSupervisor
+ * @param readyWorkers: Int : min number of ready workers set into QueueSupervisor
+ * @param containerPolicy: String : container policy used by the QueueSupervisor, eventual parameters are added in append
+ * @param activationPolicy: String : activation policy used by the Queuesupervisor, eventual parameters are added in append
  */
 case class StateInformation(
-                             var initialized: Boolean,
                              var incomingMsgCount: Int,
                              var currentMsgCount: Int,
                              var staleActivationNum: Int,
                              var existingContainerCountInNamespace: Int,
                              var inProgressContainerCountInNamespace: Int,
                              var averageDuration: Double,
-                             var limit: Int,
                              var stateName: String,
-                             var timestamp: Long
+                             var timestamp: Long,
+                             var iar: Int,
+                             var maxWorkers: Int,
+                             var minWorkers: Int,
+                             var readyWorkers: Int,
+                             var containerPolicy: String,
+                             var activationPolicy: String
                            ) extends Serializable {
   def this(snapshot: TrackQueueSnapshot) {
     this(
-      snapshot.initialized,
       snapshot.incomingMsgCount.intValue(),
       snapshot.currentMsgCount,
       snapshot.staleActivationNum,
       snapshot.existingContainerCountInNamespace,
       snapshot.inProgressContainerCountInNamespace,
       snapshot.averageDuration.getOrElse(0),
-      snapshot.limit,
       snapshot.stateName.toString,
-      System.currentTimeMillis())
+      System.currentTimeMillis(),
+      0,
+      0,
+      0,
+      0,
+      "",
+      "")
   }
 
   def this(data: Map[String, String]) {
     this(
-      data("initialized").toBoolean,
       data("incomingMsgCount").toInt,
       data("currentMsgCount").toInt,
       data("staleActivationNum").toInt,
       data("existingContainerCountInNamespace").toInt,
       data("inProgressContainerCountInNamespace").toInt,
       data("averageDuration").toDouble,
-      data("limit").toInt,
       data("stateName"),
       data("timestamp").toLong,
+      data("iar").toInt,
+      data("maxWorkers").toInt,
+      data("minWorkers").toInt,
+      data("readyWorkers").toInt,
+      data("containerPolicy"),
+      data("activationPolicy")
     )
   }
 
@@ -106,15 +122,20 @@ case class StateInformation(
     if( update.timestamp < this.timestamp )
       return NotUpdate
 
-    val needUpdate = update.initialized != this.initialized ||
+    val needUpdate =
       update.incomingMsgCount != this.incomingMsgCount ||
       update.currentMsgCount != this.currentMsgCount ||
       update.staleActivationNum != this.staleActivationNum ||
       update.existingContainerCountInNamespace != this.existingContainerCountInNamespace ||
       update.inProgressContainerCountInNamespace != this.inProgressContainerCountInNamespace ||
       update.averageDuration != this.averageDuration ||
-      update.limit != this.limit ||
-      update.stateName.compareTo(this.stateName) != 0
+      update.stateName.compareTo(this.stateName) != 0 ||
+      update.iar != this.iar ||
+      update.maxWorkers != this.maxWorkers ||
+      update.minWorkers != this.minWorkers ||
+      update.readyWorkers !=  this.readyWorkers ||
+      update.containerPolicy.compareTo(this.containerPolicy)!= 0 ||
+      update.activationPolicy.compare(this.activationPolicy)!= 0
 
     if (needUpdate) UpdateForChange else UpdateForRenew
 
@@ -126,16 +147,20 @@ case class StateInformation(
    * @return
    */
   override def toString: String = Map[String, String](
-    "initialized" -> this.initialized.toString,
     "incomingMsgCount" -> this.incomingMsgCount.toString,
     "currentMsgCount" -> this.currentMsgCount.toString,
     "staleActivationNum" -> this.staleActivationNum.toString,
     "existingContainerCountInNamespace" -> this.existingContainerCountInNamespace.toString,
     "inProgressContainerCountInNamespace" -> this.inProgressContainerCountInNamespace.toString,
     "averageDuration" -> this.averageDuration.toString,
-    "limit" -> this.limit.toString,
     "stateName" -> this.stateName,
-    "timestamp" -> this.timestamp.toString
+    "timestamp" -> this.timestamp.toString,
+    "iar" -> this.iar.toString,
+    "maxWorkers" -> this.maxWorkers.toString,
+    "minWorkers" -> this.minWorkers.toString,
+    "readyWorkers" -> this.readyWorkers.toString,
+    "containerPolicy" -> this.containerPolicy,
+    "activationPolicy" -> this.activationPolicy
   ).toJson.compactPrint
 }
 
@@ -183,7 +208,7 @@ class StateRegistry(
    * Try to place the given snapshot into the registry and eventually tries to store it into ETCD
    * @param value  the stateInformation instance to sent
    */
-  def publishUpdate(value: TrackQueueSnapshot ): Unit = {
+  def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String ): Unit = {
 
     if( !active ){
       logging.warn( this, "Trying to publish an update with a terminated StateRegistry instance. You have to create a new instance")
@@ -191,6 +216,13 @@ class StateRegistry(
     }
 
     val updateReq = new StateInformation( value )
+    updateReq.iar = iar
+    updateReq.maxWorkers = maxWorkers
+    updateReq.minWorkers = minWorkers
+    updateReq.readyWorkers = readyWorkers
+    updateReq.containerPolicy = containerPolicy
+    updateReq.activationPolicy = activationPolicy
+
     if (StateRegistry.addUpdate( namespace, action, updateReq)){  // returns true if the message is a consistent update
       update = true                                               // setting the update flag
       lastUpdate = new Timestamp(updateReq.timestamp)             // updating the timestamp of the last change
@@ -396,7 +428,7 @@ object StateRegistry{
         //  whisk/information-receiver- is the prefix common to all the keys creates by the StateRegistry
         etcdClient.getPrefix(s"whisk/information-receiver-").map {
           result =>
-            logging.info(this, s"[Framework-Analysis][Data][$schedulerId] {'kind':'StateRegistryControlData', 'dim': ${gson.toJson(result).length}, 'timestamp': ${System.currentTimeMillis()} }")
+            logging.info(this, s"[Framework-Analysis][Data][$schedulerId] {'kind':'state-registry-data', 'dim': ${gson.toJson(result).length}, 'timestamp': ${System.currentTimeMillis()} }")
             result.getKvsList.forEach {
                   //  key parsing => [0]= schedulerId, [1] = namespace, [2] = action
               key => val values = key.getKey.toString.replace("whisk/information-receiver-","").split("--")

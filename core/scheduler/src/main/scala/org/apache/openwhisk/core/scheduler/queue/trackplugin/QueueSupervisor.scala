@@ -125,7 +125,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @return False if the request has to be rejected, True otherwise
    */
   def handleActivation(msg: ActivationMessage, containers: Int, ready: Int, enqueued: Int, incoming: Int): Boolean = {
-    logging.info(this, s"[$namespace/$action] DELEGATE_AM")
+
     val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
     if (!result)
       rejectedRequests.incrementAndGet()
@@ -285,7 +285,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     }
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
-    logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'ContainerState', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
+    logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'supervisor-state', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
 
@@ -315,7 +315,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
       case DecisionResults(AddContainer, value) =>
-        inProgressCreations.addAndGet(value);
+        inProgressCreations.addAndGet(value)
         maxAddingTime = Option(System.currentTimeMillis()+60000)  // set a limit of 1m for the containers creation
         DecisionResults(AddContainer,value)
       case value => value
@@ -345,7 +345,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    */
   def delegate( snapshot: TrackQueueSnapshot ): DecisionResults = {
 
-    stateRegistry.publishUpdate(snapshot)
+    stateRegistry.publishUpdate(snapshot, math.round(iar).toInt, maxWorkers, minWorkers, readyWorkers, containerPolicy.toString, activationPolicy.toString )
     this.elaborate( snapshot.currentContainers.diff(snapshot.onRemoveContainers), snapshot.incomingMsgCount.get(), snapshot.currentMsgCount, snapshot.readyContainers.diff(snapshot.onRemoveContainers), snapshot.averageDuration)
   }
 

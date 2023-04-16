@@ -472,7 +472,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         filteredContainers.foreach{ containerId => removeDeletedContainerFromRequestBuffer(containerId)
                                                    containers -= containerId
                                                    onRemoveIds+=containerId
-                                                   actorSystem.scheduler.scheduleOnce(500.milliseconds) {self ! CancelRemovable(containerId)}}}
+                                                   actorSystem.scheduler.scheduleOnce(200.milliseconds) {self ! CancelRemovable(containerId)}}}
       stay
 
     case Event(CancelRemovable(id),_) =>

@@ -42,6 +42,8 @@ abstract class ContainerSchedulePolicy(){
    *         DecisionResults(Skip,0) do nothing
    */
   def grant( minWorkers: Int, readyWorkers: Int, maxWorkers: Int, totalContainers: Int, readyContainers: Set[String], inCreationContainers: Int, requestIar: Int, enqueuedRequests: Int, incomingRequests: Int  ): DecisionResults
+
+  override def toString: String = "ContainerSchedulePolicy"
 }
 
 /**
@@ -76,6 +78,8 @@ class AsRequested() extends ContainerSchedulePolicy{
       case value => value
     }
   }
+
+  override def toString: String = "AsRequested"
 }
 
 object AsRequested {
@@ -132,6 +136,8 @@ case class Steps(stepSize: Int) extends AsRequested {
       case value => println(s"${value.toString} $systemFree ${outsideScope(1)}"); DecisionResults( Skip, 0 )
     }
   }
+
+  override def toString: String = s"Steps $stepSize"
 }
 
 /**
@@ -147,6 +153,8 @@ case class All() extends ContainerSchedulePolicy{
       case _ => DecisionResults(Skip,0)
     }
   }
+
+  override def toString: String = "All"
 }
 
 /**
@@ -205,6 +213,8 @@ abstract class BlocksPolicy extends ContainerSchedulePolicy {
 
       }
     }
+
+    override def toString: String = "BlocksContainerPolicy"
   }
 
 /**
@@ -223,6 +233,8 @@ case class Poly( grade: Int ) extends BlocksPolicy{
 
     create(0, Array[Int](0))
   }
+
+  override def toString: String = s"Poly $grade"
 }
 
 /**
@@ -253,6 +265,8 @@ case class IPoly(grade: Int) extends BlocksPolicy{
     }.toArray
 
   }
+
+  override def toString: String = "IPoly $grade"
 }
 /**
  * Policy similar to the Poly but using the Fibonacci series which is smoother
@@ -270,4 +284,6 @@ case class Fibonacci() extends BlocksPolicy{
     }
     create(1, 0, Array[Int](0))
   }
+
+  override def toString: String = "Fibonacci"
 }

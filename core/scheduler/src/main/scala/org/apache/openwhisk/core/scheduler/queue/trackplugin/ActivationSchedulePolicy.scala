@@ -38,6 +38,8 @@ abstract class ActivationSchedulePolicy(){
      *          False reject the request with a "Too message requests" error
      */
     def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean
+
+    override def toString: String = "ActivationSchedulePolicy"
 }
 
 /**
@@ -48,6 +50,8 @@ case class AcceptTill( maxConcurrent: Int ) extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = {
         maxConcurrent <= enqueued+1
     }
+
+    override def toString: String = s"AcceptTill $maxConcurrent"
 }
 
 /**
@@ -66,6 +70,8 @@ case class AcceptEvery( maxConcurrent: Int, period: Duration ) extends Activatio
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = accept.decrementAndGet() >= 0
 
     override def close(): Unit = timer.cancel()
+
+    override def toString: String = s"AcceptEvery $maxConcurrent ${period.toMillis}"
 }
 
 /**
@@ -74,6 +80,7 @@ case class AcceptEvery( maxConcurrent: Int, period: Duration ) extends Activatio
 case class AcceptAll() extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = true
 
+    override def toString: String = "AcceptAll"
 }
 
 /**
@@ -81,4 +88,6 @@ case class AcceptAll() extends ActivationSchedulePolicy{
  */
 case class RejectAll() extends ActivationSchedulePolicy{
     override def handleActivation( msg: ActivationMessage, containers: Int, readyContainers: Int, enqueued: Int, incoming: Int, iar : Long  ): Boolean = false
+
+    override def toString: String = "RejectAll"
 }
