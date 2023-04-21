@@ -59,7 +59,7 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
     val totalContainers = existing.size + inProgress
 
     (stateName, averageDuration) match {
-
+      case (Flushing,_) => Future.successful(supervisor.tryResolveFlush())
       // we are in init state and no containers already given
       case (Running, None) if totalContainers == 0 && !initialized =>
 

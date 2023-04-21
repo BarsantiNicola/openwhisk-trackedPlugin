@@ -69,7 +69,7 @@ extends TestKit(ActorSystem("WatcherService"))
 
   logging.info(this, "TESTING SINGLE INSTANCE BEHAVIOR")
   val snapshot: TrackQueueSnapshot = TrackQueueSnapshot(initialized = false, new AtomicInteger(0), 0, containers, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
-  val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 0, containers, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
+  val snapshot2: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(0), 1, containers, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
   val snapshot3: TrackQueueSnapshot = TrackQueueSnapshot(initialized = true, new AtomicInteger(1), 0, containers, containers, containers, 0, 0, 0, 0, Option(0), 0, 0, Running, null)
 
   //  TEST TO BE EXECUTED WITHOUT FORKED TASKS. StateRegistry operates on a singleton class which produces unpredictable results on the tests

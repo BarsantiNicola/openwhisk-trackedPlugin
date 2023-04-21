@@ -19,7 +19,7 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
-import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing}
+import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing, Skip}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
@@ -45,6 +45,19 @@ import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
  */
 
 class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val stateRegistry : StateRegistry )(implicit val logging: Logging ) {
+  def tryResolveFlush(): DecisionResults = {
+    onFlushTimeout match{
+      case Some(timeout: Long) if System.currentTimeMillis() > timeout =>
+                                                               onFlushTimeout = Option(System.currentTimeMillis()+60000)
+                                                               inProgressCreations.set(1)
+                                                               DecisionResults(AddContainer,1)
+      case None => onFlushTimeout = Option(System.currentTimeMillis()+60000)
+                   inProgressCreations.set(1)
+                   DecisionResults(AddContainer,1)
+      case _ => DecisionResults(Skip,0)
+    }
+  }
+
 
   // Containers control variables
   implicit var maxWorkers: Int = supervisorConfig.maxWorkers     //  maximum number of assignable containers to the action
@@ -65,6 +78,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private var maxAddingTime : Option[Long] = None  //  time used to identify an error(system unable to satisfy the containers creations)
   private var executionTime : Option[Double] = None  // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
   private val creationTme : Double = 500  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+  private var onFlushTimeout : Option[Long] = None
 
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
@@ -316,7 +330,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
       case DecisionResults(AddContainer, value) =>
         inProgressCreations.addAndGet(value)
-        maxAddingTime = Option(System.currentTimeMillis()+60000)  // set a limit of 1m for the containers creation
+        maxAddingTime = Option(System.currentTimeMillis()+300000)  // set a limit of 5m for the containers creation
         DecisionResults(AddContainer,value)
       case value => value
     }

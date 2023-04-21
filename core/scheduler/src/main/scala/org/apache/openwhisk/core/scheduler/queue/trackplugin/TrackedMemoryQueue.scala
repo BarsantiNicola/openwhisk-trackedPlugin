@@ -254,19 +254,14 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A Failure is happened on ${creationId.asString}: $message")
       creationIds -= creationId.asString
       // when there is no container, it moves to the Flushing state as no activations can be invoked
-      if (containers.size <= 0) {
+      if (containers.isEmpty) {
         val isWhiskError = ContainerCreationError.whiskErrors.contains(error)
         if (!isWhiskError) {
           completeAllActivations(message, isWhiskError)
         }
-        logging.error(
-          this,
-          s"[$invocationNamespace:$action:$stateName] Failed to create an initial container due to ${if (isWhiskError) "whiskError"
-          else "developerError"}, reason: $message.")
 
-        goto(Flushing) using FlushingData(schedulerActor, droppingActor, error, message)
-      } else // if there are already some containers running, activations can be handled anyway.
-        stay
+      }
+      stay
   }
 
   // there is no timeout for this state as when there is no further message, it would move to the Running state again.
