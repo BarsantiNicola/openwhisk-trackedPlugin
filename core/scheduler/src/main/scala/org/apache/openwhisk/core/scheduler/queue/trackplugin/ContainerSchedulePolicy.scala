@@ -61,12 +61,21 @@ class AsRequested() extends ContainerSchedulePolicy{
                        incoming: Int
                      ): DecisionResults = {
 
+    //  check to spot if there are some containers that can be dropped
     val readyCheck = readyContainers.size - requestIar -enqueuedRequests-readyWorkers
 
+    //  evaluation if some containers can be added
+    //  in case yes => we can add or remove containers basing on the incoming requests
+    //  in case no  => we can only remove containers
     (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( requestIar +enqueuedRequests+readyWorkers, minWorkers)) match{
+
+      //  the system needs more containers
       case requiredContainers if requiredContainers > totalContainers+inCreationContainers => DecisionResults(AddContainer, requiredContainers-totalContainers-inCreationContainers)
+      //  the system has already the correct amount of containers
       case requiredContainers if requiredContainers == totalContainers+inCreationContainers => DecisionResults(Skip,0)
-      case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck > 0 => DecisionResults(RemoveReadyContainer(readyContainers.take(math.min(readyCheck, totalContainers+inCreationContainers-minWorkers))), 0)
+
+      //  the system has more containers that what it actually needs
+      case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck > 0 => DecisionResults(RemoveReadyContainer(readyContainers.take(math.min(readyCheck, readyContainers.size - minWorkers))), 0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck == 0 => DecisionResults(Skip,0)
       case requiredContainers if requiredContainers <  totalContainers+inCreationContainers && readyCheck < 0 => DecisionResults(AddContainer, math.min(maxWorkers-totalContainers-inCreationContainers, -1*readyCheck))
 
@@ -132,8 +141,7 @@ case class Steps(stepSize: Int) extends AsRequested {
       case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size == stepSize => DecisionResults(RemoveReadyContainer(containers), 0)
       case DecisionResults(RemoveReadyContainer(containers),0) if containers.size < stepSize && systemFree && outsideScope(containers.size) =>
          DecisionResults(RemoveReadyContainer(containers),0)
-      case DecisionResults(RemoveReadyContainer(containers),0) if containers.size < stepSize && systemFree => DecisionResults(RemoveReadyContainer(readyContainers.take(stepSize)),0)
-      case value => println(s"${value.toString} $systemFree ${outsideScope(1)}"); DecisionResults( Skip, 0 )
+      case _ => DecisionResults( Skip, 0 )
     }
   }
 
