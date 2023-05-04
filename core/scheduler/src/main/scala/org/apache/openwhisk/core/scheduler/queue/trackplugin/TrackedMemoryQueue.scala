@@ -459,7 +459,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   whenUnhandled {
 
     case Event(RemoveReadyContainer(containersToDrop), _) =>
-      val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(value.containerId.indexOf("wsk")) }.toSet
+      val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(1) }.toSet
       val filteredContainers = containersToDrop.intersect( droppableContainers)
       if (filteredContainers.nonEmpty) {
         logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Removing containers ${filteredContainers.toString()}")
@@ -551,7 +551,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
     case Event(cancel: CancelPoll, _) =>
       cancel.promise.trySuccess(Left(NoActivationMessage()))
-
       stay
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
@@ -695,6 +694,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Uninitialized -> _ => unstashAll()
     case _ -> Flushing      => startTimerWithFixedDelay("StopQueue", StateTimeout, queueConfig.flushGrace)
     case Flushing -> _      => cancelTimer("StopQueue")
+    case _ -> Removed => context.parent ! queueRemovedMsg
   }
 
   onTermination {
@@ -952,7 +952,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
             in,
             queue.size,
             containers.toSet,
-            requestBuffer.toList.map{ request => request.containerId.substring(request.containerId.indexOf("wsk"))}.toSet,
+            requestBuffer.toList.map{ request => request.containerId.substring(1)}.toSet,
             onRemoveIds,
             creationIds.size,
             getStaleActivationNum(0, queue),

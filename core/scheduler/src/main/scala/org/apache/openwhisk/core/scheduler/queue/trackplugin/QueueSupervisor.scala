@@ -18,8 +18,10 @@ package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.connector.ActivationMessage
+import org.apache.openwhisk.core.entity.Parameters
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing, Skip}
+import spray.json.DefaultJsonProtocol._
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
@@ -44,7 +46,7 @@ import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
  * @param action    name of the action assigned to the memoryQueue
  */
 
-class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val stateRegistry : StateRegistry )(implicit val logging: Logging ) {
+class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val annotations: Parameters, val stateRegistry : StateRegistry )(implicit val logging: Logging ) {
   def tryResolveFlush(): DecisionResults = {
     onFlushTimeout match{
       case Some(timeout: Long) if System.currentTimeMillis() > timeout =>
@@ -60,9 +62,12 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
 
   // Containers control variables
-  implicit var maxWorkers: Int = supervisorConfig.maxWorkers     //  maximum number of assignable containers to the action
-  implicit var minWorkers: Int = supervisorConfig.minWorkers     //  minimum number of assigned containers to the action
-  implicit var readyWorkers: Int = supervisorConfig.readyWorkers //  minimum number of containers ready to accept a request assigned to the action
+  implicit var maxWorkers: Int = annotations.getAs[Int]("max-workers").getOrElse(supervisorConfig.maxWorkers)
+  //  maximum number of assignable containers to the action
+  implicit var minWorkers: Int = annotations.getAs[Int]("min-workers").getOrElse(supervisorConfig.minWorkers)
+  //  minimum number of assigned containers to the action
+  implicit var readyWorkers: Int = annotations.getAs[Int]("ready-workers").getOrElse(supervisorConfig.readyWorkers)
+  //  minimum number of containers ready to accept a request assigned to the action
 
   // Counters for internal functionalities
   private[QueueSupervisor] var rejectedRequests = new AtomicInteger(0)    //  counter of the rejected activations in last 1m
@@ -82,20 +87,25 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
-  private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = supervisorConfig.schedulePolicy match {
-    case "AsRequested" => AsRequested()
-    case "Steps" => Steps(supervisorConfig.step)
-    case "Poly" =>  Poly(supervisorConfig.grade)
-    case "IPoly" => IPoly(supervisorConfig.grade)
-    case "Fibonacci" => Fibonacci()
-    case "All"  =>  All()
-    case _ => AsRequested()
+  private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = annotations
+    .getAs[String]("container-policy")
+    .getOrElse(supervisorConfig.schedulePolicy) match {
+      case "AsRequested" => AsRequested()
+      case "Steps" => Steps(supervisorConfig.step)
+      case "Poly" =>  Poly(supervisorConfig.grade)
+      case "IPoly" => IPoly(supervisorConfig.grade)
+      case "Fibonacci" => Fibonacci()
+      case "All"  =>  All()
+      case _ => AsRequested()
   }
-  private[QueueSupervisor] var activationPolicy : ActivationSchedulePolicy = supervisorConfig.activationPolicy match {
-    case "AcceptAll" => AcceptAll()
-    case "AcceptTill" => AcceptTill(supervisorConfig.maxActivationConcurrency)
-    case "AcceptEvery" => AcceptEvery(supervisorConfig.maxActivationConcurrency, Duration(supervisorConfig.acceptPeriodInMillis,MILLISECONDS))
-    case "RejectAll" => RejectAll()
+  private[QueueSupervisor] var activationPolicy : ActivationSchedulePolicy = annotations
+    .getAs[String]("activation-policy")
+    .getOrElse(supervisorConfig.activationPolicy) match {
+      case "AcceptAll" => AcceptAll()
+      case "AcceptTill" => AcceptTill(supervisorConfig.maxActivationConcurrency)
+      case "AcceptEvery" => AcceptEvery(supervisorConfig.maxActivationConcurrency, Duration(supervisorConfig.acceptPeriodInMillis,MILLISECONDS))
+      case "RejectAll" => RejectAll()
+      case _ => AcceptAll()
   }
 
   //  periodic estimation of inter-arrival rate of requests
@@ -107,9 +117,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
         }, 1000, 60000 )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
-  schedulerTimer.scheduleAtFixedRate( new TimerTask{
+  if( annotations.getAs[Boolean]("reactive").getOrElse(false))
+      schedulerTimer.scheduleAtFixedRate( new TimerTask{
           def run(): Unit = schedule( stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
-  }, 2000, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
+      }, 2000, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
 
   /**
    * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact

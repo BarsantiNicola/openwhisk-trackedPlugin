@@ -37,6 +37,7 @@ import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.etcd.EtcdKV.{QueueKeys, SchedulerKeys}
 import org.apache.openwhisk.core.etcd.EtcdType.ByteStringToString
 import org.apache.openwhisk.core.etcd.{EtcdClient, EtcdConfig, EtcdWorker}
+import org.apache.openwhisk.core.scheduler.container.trackplugin.TrackedContainerManager
 import org.apache.openwhisk.core.scheduler.container.{ContainerManager, CreationJobManager}
 import org.apache.openwhisk.core.scheduler.grpc.ActivationServiceImpl
 import org.apache.openwhisk.core.scheduler.queue._
@@ -188,9 +189,16 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
    * This component is responsible for creating containers for a given action.
    * It relies on the creationJobManager to manage the container creation job.
    */
-  val containerManager: ActorRef =
-    actorSystem.actorOf(
-      ContainerManager.props(creationJobManagerFactory, msgProvider, schedulerId, etcdClient, config, watcherService))
+  val containerManager: ActorRef = {
+    supervisorConfig match{
+      case Some(conf) if conf.enableSupervisor => actorSystem.actorOf(
+        TrackedContainerManager.props(creationJobManagerFactory, msgProvider, schedulerId, etcdClient, config, watcherService))
+      case _ =>
+        actorSystem.actorOf(
+          ContainerManager.props(creationJobManagerFactory, msgProvider, schedulerId, etcdClient, config, watcherService))
+    }
+
+  }
 
   /**
    * This is a factory to create memory queues.
@@ -208,7 +216,7 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
             actionMetaData.name.name
           )(watcherService, logging, actorSystem, etcdClient, ec)
 
-          val supervisor = new QueueSupervisor(invocationNamespace, actionMetaData.name.name, config, stateRegistry)
+          val supervisor = new QueueSupervisor(invocationNamespace, actionMetaData.name.name, config, actionMetaData.annotations, stateRegistry)
 
           val decisionMaker = factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, supervisor))
           factory.actorOf(
