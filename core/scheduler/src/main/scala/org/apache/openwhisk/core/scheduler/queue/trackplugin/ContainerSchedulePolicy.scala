@@ -62,12 +62,12 @@ class AsRequested() extends ContainerSchedulePolicy{
                      ): DecisionResults = {
 
     //  check to spot if there are some containers that can be dropped
-    val readyCheck = readyContainers.size - requestIar -enqueuedRequests-readyWorkers
+    val readyCheck = readyContainers.size - math.max(requestIar,enqueuedRequests)-readyWorkers
 
     //  evaluation if some containers can be added
     //  in case yes => we can add or remove containers basing on the incoming requests
     //  in case no  => we can only remove containers
-    (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( requestIar +enqueuedRequests+readyWorkers, minWorkers)) match{
+    (if( totalContainers + inCreationContainers <=maxWorkers ) math.min(maxWorkers, math.max( math.max(requestIar, enqueuedRequests)+readyWorkers, minWorkers)) match{
 
       //  the system needs more containers
       case requiredContainers if requiredContainers > totalContainers+inCreationContainers => DecisionResults(AddContainer, requiredContainers-totalContainers-inCreationContainers)

@@ -15,6 +15,7 @@ import org.apache.openwhisk.core.etcd.EtcdType._
 import org.apache.openwhisk.core.scheduler.Scheduler
 import org.apache.openwhisk.core.scheduler.container.{BlackboxFractionConfig, ScheduledPair}
 import org.apache.openwhisk.core.scheduler.message._
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.InvokerPriority
 import org.apache.openwhisk.core.scheduler.queue.{MemoryQueueKey, QueuePool}
 import org.apache.openwhisk.core.service._
 import org.apache.openwhisk.core.{ConfigKeys, WarmUp, WhiskConfig}
@@ -29,7 +30,8 @@ import scala.collection.JavaConverters._
 import scala.collection.concurrent.TrieMap
 import scala.collection.immutable
 import scala.collection.immutable.TreeSet
-import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
+import scala.concurrent.duration.{Duration,  SECONDS}
+import scala.concurrent.{Await, ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success}
 
 class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
@@ -40,7 +42,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
                               watcherService: ActorRef)(implicit actorSystem: ActorSystem, logging: Logging)
   extends Actor {
   private implicit val ec: ExecutionContextExecutor = context.dispatcher
-
+  private implicit val etcd: EtcdClient = etcdClient
   private val creationJobManager = jobManagerFactory(context)
 
   private val messagingProducer = provider.getProducer(config)
@@ -75,7 +77,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
         }
 
     case ContainersDeletion(containersToDrop, invocationNamespace, fqn, revision, whiskActionMetaData) =>
-      getInvokers(invocationNamespace, fqn, revision)
+      getInvokers(invocationNamespace, fqn)
         .map { invokers =>
           val msg = ContainersDeletionMessage(
             TransactionId.containerDeletion,
@@ -142,6 +144,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           logging.error(this, "there is no available invoker to schedule.")
           msgs.foreach(TrackedContainerManager.sendState(_, NoAvailableInvokersError, NoAvailableInvokersError))
         } else {
+
           val (coldCreations, warmedCreations) =
             TrackedContainerManager.filterWarmedCreations(warmedContainers, inProgressWarmedContainers, invokers, msgs)
 
@@ -159,6 +162,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
                 sendCreationContainerToInvoker(messagingProducer, chosenInvoker, msg)
                 (chosenInvoker, msg)
               }
+
           }
 
           // update the resource usage of invokers to apply changes from warmed creations.
@@ -166,6 +170,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
             chosenInvoker match {
               case Some((chosenInvoker, msg)) =>
                 TrackedContainerManager.updateInvokerMemory(chosenInvoker, msg.whiskActionMetaData.limits.memory.megabytes, invokers)
+
               case err =>
                 // this is not supposed to happen.
                 logging.error(this, s"warmed creation is scheduled but no invoker is chosen: $err")
@@ -191,6 +196,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
               }
           }
         }
+
       }
   }
 
@@ -225,8 +231,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
   }
 
   def getInvokers(invocationNamespace: String,
-                  fqn: FullyQualifiedEntityName,
-                  currentRevision: DocRevision): Future[List[Int]] = {
+                  fqn: FullyQualifiedEntityName): Future[List[Int]] = {
     val namespacePrefix = containerPrefix(ContainerKeys.namespacePrefix, invocationNamespace, fqn)
     val warmedPrefix = containerPrefix(ContainerKeys.warmedPrefix, invocationNamespace, fqn)
 
@@ -479,7 +484,7 @@ object TrackedContainerManager{
    * @return A pair of messages and assigned invokers
    */
   def schedule(invokers: List[InvokerHealth], msgs: List[ContainerCreationMessage], minMemory: ByteSize)(
-    implicit logging: Logging): List[ScheduledPair] = {
+    implicit logging: Logging, etcd: EtcdClient, ec:ExecutionContext): List[ScheduledPair] = {
     logging.info(this, s"usable total invoker size: ${invokers.size}")
 
     val tagInvokers = invokers.filter(_.id.tags.nonEmpty)
@@ -599,24 +604,64 @@ object TrackedContainerManager{
     list
   }
 
-  @tailrec
   protected[container] def chooseInvokerFromCandidates(candidates: List[InvokerHealth], msg: ContainerCreationMessage)(
-    implicit logging: Logging): ScheduledPair = {
+    implicit logging: Logging, etcdClient: EtcdClient, executor: ExecutionContext): ScheduledPair = {
     val requiredMemory = msg.whiskActionMetaData.limits.memory
     if (candidates.isEmpty) {
       ScheduledPair(msg, invokerId = None, Some(NoAvailableInvokersError))
     } else if (candidates.forall(p => p.id.userMemory.toMB < requiredMemory.megabytes)) {
       ScheduledPair(msg, invokerId = None, Some(NoAvailableResourceInvokersError))
     } else {
-      val orderedCondidates = TreeSet.empty[InvokerHealth] ++ candidates
-      val instance = orderedCondidates.firstKey
-      if (instance.id.userMemory.toMB < requiredMemory.megabytes) {
-        chooseInvokerFromCandidates((orderedCondidates-instance).toList, msg)
+      val orderedCandidates : TreeSet[OrderedInvokerHealth] = Await.result(orderInvokersByPriority(msg.invocationNamespace, msg.action.name.name, candidates), Duration(5,SECONDS))
+      orderedCandidates.foreach{v => logging.info(this, s"ORDERED: ${v.priority} ${v.invokerHealth == null}")}
+      val instance = orderedCandidates.firstKey
+      if (instance.invokerHealth.id.userMemory.toMB < requiredMemory.megabytes) {
+        chooseInvokerFromOrderedCandidates((orderedCandidates - instance), msg)
       } else {
-        ScheduledPair(msg, invokerId = Some(instance.id))
+        ScheduledPair(msg, invokerId = Option(instance.invokerHealth.id))
       }
     }
   }
+
+  @tailrec
+  protected[container] def chooseInvokerFromOrderedCandidates(candidates: TreeSet[OrderedInvokerHealth], msg: ContainerCreationMessage)(
+    implicit logging: Logging, etcdClient: EtcdClient, executor: ExecutionContext): ScheduledPair = {
+    val requiredMemory = msg.whiskActionMetaData.limits.memory
+    if (candidates.isEmpty) {
+      ScheduledPair(msg, invokerId = None, Some(NoAvailableInvokersError))
+    } else if (candidates.forall(p => p.invokerHealth.id.userMemory.toMB < requiredMemory.megabytes)) {
+      ScheduledPair(msg, invokerId = None, Some(NoAvailableResourceInvokersError))
+    } else {
+      val instance = candidates.firstKey
+      if (instance.invokerHealth.id.userMemory.toMB < requiredMemory.megabytes) {
+            chooseInvokerFromOrderedCandidates((candidates - instance), msg)
+          } else {
+            ScheduledPair(msg, invokerId = Option(instance.invokerHealth.id))
+          }
+      }
+  }
+
+  case class OrderedInvokerHealth( invokerHealth: InvokerHealth, priority: InvokerPriority)
+  private def orderInvokersByPriority(namespace: String, action: String, invokers: List[InvokerHealth])(implicit etcd: EtcdClient, ec: ExecutionContext, logging: Logging) : Future[TreeSet[OrderedInvokerHealth]] = {
+    val mappedInvokers = Map.empty[Int, InvokerHealth] ++ invokers.map { invoker => invoker.id.instance -> invoker }
+    etcd
+      .getPrefix(s"$namespace-$action-priority-")
+      .map { _.getKvsList.asScala
+          .map { kv =>
+            {
+              logging.info(this,s"KEY: ${kv.getKey.toString("UTF-8")} : ${kv.getKey.toStringUtf8}")
+              val id = kv.getKey.toStringUtf8.replace(s"$namespace-$action-priority-", "").toInt
+              mappedInvokers.get(id) match {
+                case Some(invokerhealth: InvokerHealth) => OrderedInvokerHealth(invokerhealth, InvokerPriority(id, kv.getValue.toStringUtf8.toInt))
+                case _ => OrderedInvokerHealth(null, InvokerPriority(id, -1))
+              }
+            }
+          }.filter( _.priority.priority != -1 )
+      }.map {
+        TreeSet.empty[OrderedInvokerHealth]((x: OrderedInvokerHealth, y: OrderedInvokerHealth) => x.priority.priority - y.priority.priority) ++ _
+      }
+  }
+
 
   private def sendState(msg: ContainerCreationMessage, err: ContainerCreationError, reason: String)(
     implicit logging: Logging): Unit = {
@@ -630,7 +675,7 @@ object TrackedContainerManager{
   }
 
   protected[scheduler] def getAvailableInvokers(etcd: EtcdClient, minMemory: ByteSize, invocationNamespace: String)(
-    implicit executor: ExecutionContext): Future[List[InvokerHealth]] = {
+    implicit executor: ExecutionContext, logging:Logging): Future[List[InvokerHealth]] = {
     etcd
       .getPrefix(InvokerKeys.prefix)
       .map { res =>
@@ -646,6 +691,7 @@ object TrackedContainerManager{
                 }
 
                 val temporalId = InvokerKeys.getInstanceId(kv.getKey.toString(StandardCharsets.UTF_8))
+                logging.info(this, s"[Framework-Analysis][Data] {'kind': 'invokers-memory', 'invoker': ${temporalId.instance}, 'memory':'${temporalId.userMemory}', 'timestamp': ${System.currentTimeMillis()}}")
                 val invoker = temporalId.copy(
                   userMemory = resourceMessage.freeMemory.MB,
                   busyMemory = Some(resourceMessage.busyMemory.MB),

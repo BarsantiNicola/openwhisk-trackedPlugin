@@ -124,22 +124,22 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   private val namespaceThrottlingKey = ThrottlingKeys.namespace(EntityName(invocationNamespace))
   private val actionThrottlingKey = ThrottlingKeys.action(invocationNamespace, unversionedAction)
   private val pollTimeOut = 1.seconds
-  private var requestBuffer = mutable.PriorityQueue.empty[BufferedRequest]
   private val memory = actionMetaData.limits.memory.megabytes.MB
   private val queueRemovedMsg = QueueRemoved(invocationNamespace, action.toDocId.asDocInfo(revision), Some(leaderKey))
   private val staleQueueRemovedMsg = QueueRemoved(invocationNamespace, action.toDocId.asDocInfo(revision), None)
   private val actionRetentionTimeout = TrackedMemoryQueue.getRetentionTimeout(actionMetaData, queueConfig, supervisor)
+  private var requestBuffer = mutable.PriorityQueue.empty[BufferedRequest]
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var onRemoveIds: Set[String] = Set[String]()
-
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
-  private[queue] var in = new AtomicInteger(0)
+
+  private[queue] val in = new AtomicInteger(0)
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
   private[queue] val namespaceContainerCount = NamespaceContainerCount(invocationNamespace, etcdClient, watcherService)
   private[queue] var averageDuration: Option[Double] = None
-  private[queue] var averageDurationBuffer = SimpleAverageRingBuffer(queueConfig.durationBufferSize)
-  private[queue] var limit: Option[Int] = None
+  private[queue] val averageDurationBuffer = SimpleAverageRingBuffer(queueConfig.durationBufferSize)
+  private[queue] val limit: Option[Int] = None
   private[queue] var initialized = false
 
   private val logScheduler: Cancellable = context.system.scheduler.scheduleWithFixedDelay(0.seconds, 1.seconds) { () =>
@@ -250,9 +250,10 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         stay
       }
 
-    case Event(FailedCreationJob(creationId, _, _, _, error, message), RunningData(schedulerActor, droppingActor)) =>
+    case Event(FailedCreationJob(creationId, _, _, _, error, message), RunningData(_, _)) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A Failure is happened on ${creationId.asString}: $message")
       creationIds -= creationId.asString
+      supervisor.failedJob()
       // when there is no container, it moves to the Flushing state as no activations can be invoked
       if (containers.isEmpty) {
         val isWhiskError = ContainerCreationError.whiskErrors.contains(error)
@@ -519,6 +520,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           val containerId = key.split("/").last
           removeDeletedContainerFromRequestBuffer(containerId)
           containers -= containerId
+          onRemoveIds -= containerId
         case _ =>
       }
       stay
@@ -546,6 +548,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(
         this,
         s"[$invocationNamespace:$action:$stateName][$creationId] Got failed creation job with revision $revision and error $message.")
+      supervisor.failedJob()
       stay()
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
@@ -579,6 +582,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         removeDeletedContainerFromRequestBuffer(request.containerId)
         sender ! GetActivationResponse(Left(NoActivationMessage()))
         containers -= request.containerId
+        onRemoveIds -= request.containerId
         stay
       }
 

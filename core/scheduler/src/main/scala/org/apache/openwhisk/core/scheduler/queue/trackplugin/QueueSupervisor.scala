@@ -16,16 +16,27 @@
  */
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
-import org.apache.openwhisk.common.Logging
+import org.apache.openwhisk.common.{InvokerHealth, Logging}
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.entity.Parameters
+import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, AddInitialContainer, DecisionResults, Pausing, Skip}
 import spray.json.DefaultJsonProtocol._
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.{Timer, TimerTask}
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
+import org.apache.openwhisk.common.InvokerState.{Healthy, Offline, Unhealthy}
+import org.apache.openwhisk.core.connector._
+import org.apache.openwhisk.core.entity._
+import org.apache.openwhisk.core.entity.size._
+import org.apache.openwhisk.core.etcd.EtcdKV.InvokerKeys
+import org.apache.openwhisk.core.etcd.EtcdType._
+
+import java.nio.charset.StandardCharsets
+import scala.collection.JavaConverters._
 
 /**
  * Class nested to the SchedulingDecisionMaker actor to control the action containers management. The core parts of the
@@ -46,20 +57,7 @@ import scala.concurrent.duration.{Duration, MILLISECONDS, SECONDS}
  * @param action    name of the action assigned to the memoryQueue
  */
 
-class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val annotations: Parameters, val stateRegistry : StateRegistry )(implicit val logging: Logging ) {
-  def tryResolveFlush(): DecisionResults = {
-    onFlushTimeout match{
-      case Some(timeout: Long) if System.currentTimeMillis() > timeout =>
-                                                               onFlushTimeout = Option(System.currentTimeMillis()+60000)
-                                                               inProgressCreations.set(1)
-                                                               DecisionResults(AddContainer,1)
-      case None => onFlushTimeout = Option(System.currentTimeMillis()+60000)
-                   inProgressCreations.set(1)
-                   DecisionResults(AddContainer,1)
-      case _ => DecisionResults(Skip,0)
-    }
-  }
-
+class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val annotations: Parameters, val stateRegistry : StateRegistry, val etcdClient: EtcdClient )(implicit val logging: Logging, ec: ExecutionContext) {
 
   // Containers control variables
   implicit var maxWorkers: Int = annotations.getAs[Int]("max-workers").getOrElse(supervisorConfig.maxWorkers)
@@ -68,7 +66,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   //  minimum number of assigned containers to the action
   implicit var readyWorkers: Int = annotations.getAs[Int]("ready-workers").getOrElse(supervisorConfig.readyWorkers)
   //  minimum number of containers ready to accept a request assigned to the action
-
+  (new Timer).schedule(new TimerTask {
+    override def run(): Unit = minWorkers = 0
+  }, 15000)
   // Counters for internal functionalities
   private[QueueSupervisor] var rejectedRequests = new AtomicInteger(0)    //  counter of the rejected activations in last 1m
   private[QueueSupervisor] val acceptedRequests = new AtomicInteger(0)    //  last minute arrivals(used to compute iar)
@@ -121,6 +121,18 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       schedulerTimer.scheduleAtFixedRate( new TimerTask{
           def run(): Unit = schedule( stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
       }, 2000, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
+
+  getInvokerStates()(etcdClient,ec).map{ invokers =>
+    updateInvokersPriority(invokers.map{ invoker =>
+      invoker.id.instance match{
+        case 0 => InvokerPriority(invoker.id.instance,2)
+        case 1 => InvokerPriority(invoker.id.instance,4)
+        case 2 => InvokerPriority(invoker.id.instance,1)
+        case 3 => InvokerPriority(invoker.id.instance,3)
+        case 4 => InvokerPriority(invoker.id.instance,0)
+      }
+    })(etcdClient)
+  }
 
   /**
    * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact
@@ -382,7 +394,61 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @return
    */
   def activationsRecentlyRejected() : Int = rejectedRequests.get()
+
+  def failedJob() : Unit = inProgressCreations.decrementAndGet()
+
+  def tryResolveFlush(): DecisionResults = {
+    onFlushTimeout match {
+      case Some(timeout: Long) if System.currentTimeMillis() > timeout =>
+        onFlushTimeout = Option(System.currentTimeMillis() + 60000)
+        inProgressCreations.set(1)
+        DecisionResults(AddContainer, 1)
+      case None => onFlushTimeout = Option(System.currentTimeMillis() + 60000)
+        inProgressCreations.set(1)
+        DecisionResults(AddContainer, 1)
+      case _ => DecisionResults(Skip, 0)
+    }
+  }
+
+  def getInvokerStates()(implicit etcdClient: EtcdClient, ec: ExecutionContext): Future[List[InvokerHealth]] = {
+      etcdClient
+        .getPrefix(InvokerKeys.prefix)
+        .map { res =>
+          res.getKvsList.asScala
+            .map { kv =>
+              InvokerResourceMessage
+                .parse(kv.getValue.toString(StandardCharsets.UTF_8))
+                .map { resourceMessage =>
+                  val status = resourceMessage.status match {
+                    case Healthy.asString => Healthy
+                    case Unhealthy.asString => Unhealthy
+                    case _ => Offline
+                  }
+
+                  val temporalId = InvokerKeys.getInstanceId(kv.getKey.toString(StandardCharsets.UTF_8))
+                  val invoker = temporalId.copy(
+                    userMemory = resourceMessage.freeMemory.MB,
+                    busyMemory = Some(resourceMessage.busyMemory.MB),
+                    tags = resourceMessage.tags,
+                    dedicatedNamespaces = resourceMessage.dedicatedNamespaces)
+                  InvokerHealth(invoker, status)
+                }
+                .getOrElse(InvokerHealth(InvokerInstanceId(kv.getKey, userMemory = 0.MB), Offline))
+            }
+            .filter(i => i.status.isUsable)
+            .toList
+        }
+    }
+
+  def updateInvokersPriority(priorities: List[InvokerPriority])(implicit etcdClient: EtcdClient) : Unit = {
+    priorities.foreach{ priority =>
+      etcdClient.put( s"$namespace-$action-priority-${priority.invokerId}", priority.priority.toString)
+    }
+  }
+
 }
+
+case class InvokerPriority(invokerId: Int, priority: Int)
 
 
 

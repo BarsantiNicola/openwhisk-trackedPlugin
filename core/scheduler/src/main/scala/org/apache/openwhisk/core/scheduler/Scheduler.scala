@@ -216,7 +216,7 @@ class Scheduler(schedulerId: SchedulerInstanceId, schedulerEndpoints: SchedulerE
             actionMetaData.name.name
           )(watcherService, logging, actorSystem, etcdClient, ec)
 
-          val supervisor = new QueueSupervisor(invocationNamespace, actionMetaData.name.name, config, actionMetaData.annotations, stateRegistry)
+          val supervisor = new QueueSupervisor(invocationNamespace, actionMetaData.name.name, config, actionMetaData.annotations, stateRegistry, etcdClient)
 
           val decisionMaker = factory.actorOf(TrackedSchedulingDecisionMaker.props(invocationNamespace, fqn, supervisor))
           factory.actorOf(
