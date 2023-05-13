@@ -73,12 +73,10 @@ case class TrackQueueSnapshot(initialized: Boolean,
                          limit: Int,
                          maxActionConcurrency: Int,
                          stateName: MemoryQueueState,
+                         actionData: WhiskActionMetaData,
                          recipient: ActorRef)
 
-case object Clean extends RequiredAction   //  Message for cleaning the added testing environment on queue removing
-
 case class RemoveReadyContainer( containers : Set[String] ) extends RequiredAction
-case class CancelRemovable(id: String)
 
 class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
                   private val etcdClient: EtcdClient,
@@ -440,7 +438,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     // actors and data are already wiped
     case Event(QueueRemovedCompleted, _: NoData) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Queue removal completed. Starting framework clean")
-      decisionMaker ! Clean
       stop()
 
     // This is not supposed to happen. This will ensure the queue does not run forever.
@@ -448,7 +445,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(StateTimeout, _: NoData) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] QueueManager doesn't respond. Forcing memory queue removal")
       context.parent ! queueRemovedMsg
-      decisionMaker ! Clean
       stop()
 
     // This queue is going to stop, do nothing
@@ -468,12 +464,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         filteredContainers.foreach{ containerId => removeDeletedContainerFromRequestBuffer(containerId)
                                                    containers -= containerId
                                                    onRemoveIds+=containerId
-                                                   actorSystem.scheduler.scheduleOnce(200.milliseconds) {self ! CancelRemovable(containerId)}}}
-      stay
-
-    case Event(CancelRemovable(id),_) =>
-      onRemoveIds -= id
-      removeDeletedContainerFromRequestBuffer(id)
+                                                   }}
       stay
 
     // The queue endpoint is removed, trying to restore it.
@@ -629,7 +620,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
       // delete relative data, e.g leaderKey, namespaceThrottlingKey, actionThrottlingKey
       cleanUpData()
-
+      containerManager ! ContainersDeletion(containers.toSet, invocationNamespace, action, revision = revision, whiskActionMetaData = actionMetaData)
       goto(Removing) using getRemovingData(data, outdated = false)
 
     // the version is updated. it's a shared case for all states
@@ -637,6 +628,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Stop further scheduling.")
       // let QueueManager know this queue is no longer in charge.
       context.parent ! staleQueueRemovedMsg
+      containerManager ! ContainersDeletion(containers.toSet, invocationNamespace, action, revision = revision, whiskActionMetaData = actionMetaData)
 
       handleStaleActivationsWhenActionUpdated(context.parent)
 
@@ -966,6 +958,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
             limit,
             actionMetaData.limits.concurrency.maxConcurrent,
             stateName,
+            actionMetaData,
             self)
 
         case Failure(_: NoDocumentException) =>

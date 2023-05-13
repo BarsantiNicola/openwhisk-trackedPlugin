@@ -38,8 +38,6 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
           case Success(result: DecisionResults) => msg.recipient ! result
           case Failure(e) => logging.error(this, s"failed to make a scheduling decision due to $e");
         }
-
-    case Clean => supervisor.clean()
   }
 
   private[queue] def decide(snapshot: TrackQueueSnapshot) = {
@@ -54,6 +52,7 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
     averageDuration,
     _, _,
     stateName,
+    action,
     _) = snapshot
 
     val totalContainers = existing.size + inProgress
@@ -68,12 +67,17 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
             s"add one initial container if totalContainers($totalContainers) == 0 [$invocationNamespace:$action]")
         Future.successful(supervisor.initStrategy())
 
-      case (Running|Idle, _) => Future.successful(supervisor.delegate(snapshot))
+      case (Running|Idle, _) => Future.successful(supervisor.delegate(snapshot, action.annotations))
 
       // do nothing
       case _ => Future.successful(DecisionResults(Skip, 0))
 
     }
+  }
+
+  override def postStop(): Unit = {
+    super.postStop()
+    supervisor.clean()
   }
 }
 

@@ -26,6 +26,7 @@ import com.ibm.etcd.client.kv.KvClient.Watch
 import com.ibm.etcd.client.kv.WatchUpdate
 import com.ibm.etcd.client.{EtcdClient => Client}
 import common.StreamLogging
+import org.apache.openwhisk.core.entity.Parameters
 import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
 import org.apache.openwhisk.core.scheduler.queue.trackplugin._
@@ -68,103 +69,85 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
     2,
     "AcceptAll",
     2,
-    500)
+    500,
+    "Consolidation")
   implicit val etcdClient: EtcdClient = new MockEtcdClient(client, true)
   implicit val watcherService: ActorRef = system.actorOf(WatcherService.props(etcdClient))
 
   it should "Elaborate runtime the Inter-arrival time correctly using a dynamic action execution time" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(29999.9))
     Thread.sleep(70000)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 1
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 1
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 1
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 1
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 1
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 0
     supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(120000))
     Thread.sleep(70000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 2
     Thread.sleep(60000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 3
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 4
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     Thread.sleep(60000)
-    println(supervisor.iar)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 4
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 4
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 4
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 2
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 1
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 0
     Thread.sleep(60000)
-    println(supervisor.iar)
     math.round(supervisor.iar).toInt shouldBe 0
     supervisor.clean()
   }
-  /*
+
   it should "Set the minWorkers equals to readyWorkers and maxWorkers" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace,action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace,action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setMinWorkers(0) shouldBe true
     supervisor.setReadyWorkers(0) shouldBe true
     supervisor.setMaxWorkers(0) shouldBe true
@@ -173,49 +156,49 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Set the minWorkers equals to readyWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setReadyWorkers(1) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the readyWorkers equals to maxWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setReadyWorkers(3) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the minWorkers less than readyWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setMinWorkers(0) shouldBe true
     supervisor.clean()
   }
 
   it should "Set the maxWorkers higher than readyWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setMaxWorkers(4) shouldBe true
     supervisor.clean()
   }
 
   it should "Not permit to set readyWorkers higher than maxWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setReadyWorkers(4) shouldBe false
     supervisor.clean()
   }
 
   it should "Not permit to set maxWorkers less than than readyWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setMaxWorkers(1) shouldBe false
     supervisor.clean()
   }
 
   it should "Not permit to set readyWorkers less than minWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.setReadyWorkers(0) shouldBe false
     supervisor.clean()
   }
@@ -240,19 +223,19 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   it should "Be able to call periodically the schedule function" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
     val supervisor = new TestQueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
-    Thread.sleep(3000)
-    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() - 1000, 500) shouldBe true
-    Thread.sleep(30000)
-    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() - 1000, 500) shouldBe true
-    Thread.sleep(30000)
-    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() - 1000, 500) shouldBe true
+    Thread.sleep(2000)
+    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() , 500) shouldBe true
+    Thread.sleep(1000)
+    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis(), 500) shouldBe true
+    Thread.sleep(1000)
+    moreOrLess(supervisor.testTimestamp, System.currentTimeMillis() , 500) shouldBe true
     supervisor.clean()
   }
 
 
   it should "Elaborate runtime the Inter-arrival time correctly" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(60000))
     supervisor.handleActivation( null, 0,0,0,0) shouldBe true
     math.round(supervisor.iar).toInt shouldBe 0
@@ -278,7 +261,7 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Elaborate runtime the Inter-arrival time correctly managing higher values" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, stateRegistry)
+    val supervisor = new QueueSupervisor(namespace, action, supervisorConfig, Parameters.apply(), stateRegistry, etcdClient)
     supervisor.elaborate(Set[String](), 0, 0, Set[String](), Option(60000))
     Thread.sleep(70000)
     supervisor.handleActivation(null, 0, 0, 0, 0) shouldBe true
@@ -309,12 +292,10 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
     math.round(supervisor.iar).toInt shouldBe 0
     supervisor.clean()
   }
-  */
-
 
   def moreOrLess( checkTime: Long, timestamp: Long, variation: Long ): Boolean = checkTime < timestamp+variation && checkTime > timestamp-variation
 
-  class TestQueueSupervisor(namespace: String, action: String, config: SchedulingSupervisorConfig, stateRegistry: StateRegistry) extends QueueSupervisor(namespace, action, config,stateRegistry){
+  class TestQueueSupervisor(namespace: String, action: String, config: SchedulingSupervisorConfig, stateRegistry: StateRegistry) extends QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient){
 
     var testTimestamp : Long = 0
     var variation : Long = 0
@@ -330,7 +311,7 @@ class QueueSupervisorTests extends TestKit(ActorSystem("WatcherService"))
   }
   class MockStateRegistry(namespace: String, action: String) extends StateRegistry(namespace, action) {
 
-    override def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String ): Unit = {
+    override def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String, usages: List[InvokerUsage] ): Unit = {
     }
 
     override def clean(): Unit = {}

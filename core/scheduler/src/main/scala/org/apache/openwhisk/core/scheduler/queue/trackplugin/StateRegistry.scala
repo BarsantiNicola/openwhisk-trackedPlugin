@@ -21,22 +21,22 @@ import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import com.google.gson.Gson
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.etcd.EtcdClient
+import org.apache.openwhisk.core.scheduler.queue.RequiredAction
 import org.apache.openwhisk.core.service._
-import spray.json.DefaultJsonProtocol._
 import spray.json._
 
 import java.sql.Timestamp
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.ExecutionContext
-import scala.util.{Failure, Random, Success}
+import scala.util.{Failure, Random, Success, Try}
 
 //  Set of messages returned by StateInformation.equals[used internally by StateInformation object]
 sealed trait CheckResult
 case object UpdateForChange extends CheckResult  //  the given snapshot is fresh and different from the stored one
 case object UpdateForRenew extends CheckResult   //  the given snapshot is fresh but equal to the stored one
 case object NotUpdate extends CheckResult        //  the given snapshot is not fresh
-
+case object Clean extends RequiredAction   //  Message for cleaning the added testing environment on queue removing
 case class UpdateState( update: Boolean, lastUpdate: Timestamp )
 
 /**
@@ -71,7 +71,8 @@ case class StateInformation(
                              var minWorkers: Int,
                              var readyWorkers: Int,
                              var containerPolicy: String,
-                             var activationPolicy: String
+                             var activationPolicy: String,
+                             var invokersState: Set[InvokerUsage]
                            ) extends Serializable {
   def this(snapshot: TrackQueueSnapshot) {
     this(
@@ -88,26 +89,8 @@ case class StateInformation(
       0,
       0,
       "",
-      "")
-  }
-
-  def this(data: Map[String, String]) {
-    this(
-      data("incomingMsgCount").toInt,
-      data("currentMsgCount").toInt,
-      data("staleActivationNum").toInt,
-      data("existingContainerCountInNamespace").toInt,
-      data("inProgressContainerCountInNamespace").toInt,
-      data("averageDuration").toDouble,
-      data("stateName"),
-      data("timestamp").toLong,
-      data("iar").toInt,
-      data("maxWorkers").toInt,
-      data("minWorkers").toInt,
-      data("readyWorkers").toInt,
-      data("containerPolicy"),
-      data("activationPolicy")
-    )
+      "",
+      Set.empty[InvokerUsage])
   }
 
   /**
@@ -135,35 +118,46 @@ case class StateInformation(
       update.minWorkers != this.minWorkers ||
       update.readyWorkers !=  this.readyWorkers ||
       update.containerPolicy.compareTo(this.containerPolicy)!= 0 ||
-      update.activationPolicy.compare(this.activationPolicy)!= 0
+      update.activationPolicy.compare(this.activationPolicy)!= 0 ||
+      !update.invokersState.equals(this.invokersState)
 
     if (needUpdate) UpdateForChange else UpdateForRenew
-
   }
-
-  /**
-   * Redefinition of the toString method to be a marshalling easy usable with the spray.json library
-   * TODO to change to use POJO spray marshalling/unmarshalling
-   * @return
-   */
-  override def toString: String = Map[String, String](
-    "incomingMsgCount" -> this.incomingMsgCount.toString,
-    "currentMsgCount" -> this.currentMsgCount.toString,
-    "staleActivationNum" -> this.staleActivationNum.toString,
-    "existingContainerCountInNamespace" -> this.existingContainerCountInNamespace.toString,
-    "inProgressContainerCountInNamespace" -> this.inProgressContainerCountInNamespace.toString,
-    "averageDuration" -> this.averageDuration.toString,
-    "stateName" -> this.stateName,
-    "timestamp" -> this.timestamp.toString,
-    "iar" -> this.iar.toString,
-    "maxWorkers" -> this.maxWorkers.toString,
-    "minWorkers" -> this.minWorkers.toString,
-    "readyWorkers" -> this.readyWorkers.toString,
-    "containerPolicy" -> this.containerPolicy,
-    "activationPolicy" -> this.activationPolicy
-  ).toJson.compactPrint
 }
 
+object StateInformation extends DefaultJsonProtocol{
+
+  def parse(msg:String): Try[StateInformation] = Try(serdes.read(msg.parseJson))
+
+  implicit val serdes: RootJsonFormat[StateInformation] = jsonFormat15(
+    StateInformation
+      .apply(
+        _: Int,
+        _: Int,
+        _: Int,
+        _: Int,
+        _: Int,
+        _: Double,
+        _: String,
+        _ : Long,
+        _:Int,
+        _:Int,
+        _:Int,
+        _:Int,
+        _:String,
+        _:String,
+        _:Set[InvokerUsage]
+      ))
+}
+
+case class InvokerUsage(invokerId: Int, usage: Long)
+object InvokerUsage extends DefaultJsonProtocol {
+  def parse(msg: String): Try[InvokerUsage] = Try(serdes.read(msg.parseJson))
+
+  implicit val serdes: RootJsonFormat[InvokerUsage] = jsonFormat2(
+    InvokerUsage
+      .apply(_: Int, _: Long))
+}
 /**
  * Class for the creation of a StateRegistry able to share state information with all the instances independently from their
  * position(locally or on another host). The class uses the Etcd database and the WatcherService actor for creating a content
@@ -201,14 +195,13 @@ class StateRegistry(
   private var update : Boolean = StateRegistry.stateRegistry.nonEmpty
   private var lastUpdate : Timestamp = if( StateRegistry.updateRegistry.nonEmpty) StateRegistry.lastUpdate else new Timestamp(System.currentTimeMillis())
   private var active = true
-
   //  USABLE FUNCTIONS
 
   /**
    * Try to place the given snapshot into the registry and eventually tries to store it into ETCD
    * @param value  the stateInformation instance to sent
    */
-  def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String ): Unit = {
+  def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String, invokersState: List[InvokerUsage] ): Unit = {
 
     if( !active ){
       logging.warn( this, "Trying to publish an update with a terminated StateRegistry instance. You have to create a new instance")
@@ -222,12 +215,13 @@ class StateRegistry(
     updateReq.readyWorkers = readyWorkers
     updateReq.containerPolicy = containerPolicy
     updateReq.activationPolicy = activationPolicy
+    updateReq.invokersState = invokersState.toSet
 
     if (StateRegistry.addUpdate( namespace, action, updateReq)){  // returns true if the message is a consistent update
       update = true                                               // setting the update flag
       lastUpdate = new Timestamp(updateReq.timestamp)             // updating the timestamp of the last change
       forwardUpdate(updateReq)                                    // writing the update on etcd
-      logging.info(this, s"[Framework-Analysis][Data][$namespace][$action] ${updateReq.toString}")
+      logging.info(this, s"[Framework-Analysis][Data][$namespace][$action] ${updateReq.toJson}")
       logging.info(this, s"[$schedulerId] Writing an update on etcd for $namespace-$action")
     }
   }
@@ -279,7 +273,7 @@ class StateRegistry(
       return
     }
 
-    etcdClient.put(s"whisk/$watcherName--$namespace--$action", value.toString).andThen {
+    etcdClient.put(s"whisk/$watcherName--$namespace--$action", value.toJson.compactPrint).andThen {
       case Success(_) => logging.info(this, s"[Framework-Analysis][Event] Data for $namespace/$action correctly stored on ETCD")
       case Failure(e) => logging.error(this, s"[Framework-Analysis][Event] Error during storage of namespace $namespace -> ${e.toString}")
     }
@@ -372,14 +366,16 @@ object StateRegistry{
    */
   def getUpdateStatus( namespace: String, action: String ): UpdateState = {
 
-    //  if it is not present we automatically add it
-    UpdateState(
-      updateRegistry.getOrElse( s"$namespace--$action", {
-        val updateValue = if(stateRegistry.size == 1 && stateRegistry.contains( s"$namespace--$action")) false else stateRegistry.nonEmpty
-        updateRegistry.put( s"$namespace--$action", updateValue )
-        updateValue
-      }),
-      lastUpdate )
+    this.synchronized {
+      //  if it is not present we automatically add it
+      UpdateState(
+        updateRegistry.getOrElse(s"$namespace--$action", {
+          val updateValue = if (stateRegistry.size == 1 && stateRegistry.contains(s"$namespace--$action")) false else stateRegistry.nonEmpty
+          updateRegistry.put(s"$namespace--$action", updateValue)
+          updateValue
+        }),
+        lastUpdate)
+    }
   }
 
   /**
@@ -393,11 +389,14 @@ object StateRegistry{
    * stop its behavior
    */
   private def registryInstance(namespace: String, action: String ): Unit = {
-    if( !stateRegistry.contains( s"$namespace--$action")){
-      updateRegistry.put(s"$namespace--$action", stateRegistry.nonEmpty )
-      registrationCounter.incrementAndGet()
+    this.synchronized {
+      if (!stateRegistry.contains(s"$namespace--$action")) {
+        updateRegistry.put(s"$namespace--$action", stateRegistry.nonEmpty)
+        registrationCounter.incrementAndGet()
+      }
     }
   }
+
 
   /**
    * Initialization function, must be called once. Other request will not produce any effect
@@ -432,7 +431,7 @@ object StateRegistry{
             result.getKvsList.forEach {
                   //  key parsing => [0]= schedulerId, [1] = namespace, [2] = action
               key => val values = key.getKey.toString.replace("whisk/information-receiver-","").split("--")
-                StateRegistry.addUpdate( values(1), values(2), new StateInformation(key.getValue.toString.parseJson.convertTo[Map[String, String]]))}
+                StateRegistry.addUpdate( values(1), values(2), key.getValue.toStringUtf8.parseJson.convertTo[StateInformation])}
         }
       }
     }
@@ -443,11 +442,13 @@ object StateRegistry{
    * @param force if true the singleton will always be destroyed(recommended only for testing purpose)
    */
   private def clean(force:Boolean=false): Unit = {
-    if( isInit && force || isInit && registrationCounter.decrementAndGet() == 0 ){
-      share.get ! Clean
-      share = None
-      stateRegistry.clear()
-      updateRegistry.clear()
+    this.synchronized {
+      if (isInit && force || isInit && registrationCounter.decrementAndGet() == 0) {
+        share.get ! Clean
+        share = None
+        stateRegistry.clear()
+        updateRegistry.clear()
+      }
     }
   }
   /**
@@ -460,7 +461,8 @@ object StateRegistry{
    *         true otherwise
    */
   def addUpdate( namespace: String, action: String, updateMsg: StateInformation ): Boolean = {
-      var forward : Boolean = false
+    this.synchronized {
+      var forward: Boolean = false
       stateRegistry.getOrElseUpdate(s"$namespace--$action", {
         lastUpdate = new Timestamp(System.currentTimeMillis())
         update(namespace, action)
@@ -468,14 +470,15 @@ object StateRegistry{
         updateMsg
       }).check(updateMsg) match {
         case UpdateForChange => stateRegistry.replace(s"$namespace--$action", updateMsg)
-              lastUpdate = new Timestamp(updateMsg.timestamp)
-              update(namespace, action)
-              forward = true
+          lastUpdate = new Timestamp(updateMsg.timestamp)
+          update(namespace, action)
+          forward = true
         case UpdateForRenew => stateRegistry.replace(s"$namespace--$action", updateMsg)
         case NotUpdate =>
       }
       forward
     }
+  }
 }
 
 /**
@@ -516,7 +519,7 @@ class InformationReceiver(
       if ( parsedKey(0).compareTo(schedulerId) != 0 ) StateRegistry.addUpdate(
         parsedKey(1),
         parsedKey(2),
-        new StateInformation(req.value.parseJson.convertTo[Map[String, String]]))
+        req.value.parseJson.convertTo[StateInformation])
 
     //  a key has been removed(state-registry removal)
     case req: WatchEndpointRemoved =>

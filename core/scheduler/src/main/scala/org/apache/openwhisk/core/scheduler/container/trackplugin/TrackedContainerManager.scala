@@ -649,7 +649,6 @@ object TrackedContainerManager{
       .map { _.getKvsList.asScala
           .map { kv =>
             {
-              logging.info(this,s"KEY: ${kv.getKey.toString("UTF-8")} : ${kv.getKey.toStringUtf8}")
               val id = kv.getKey.toStringUtf8.replace(s"$namespace-$action-priority-", "").toInt
               mappedInvokers.get(id) match {
                 case Some(invokerhealth: InvokerHealth) => OrderedInvokerHealth(invokerhealth, InvokerPriority(id, kv.getValue.toStringUtf8.toInt))
@@ -658,7 +657,11 @@ object TrackedContainerManager{
             }
           }.filter( _.priority.priority != -1 )
       }.map {
-        TreeSet.empty[OrderedInvokerHealth]((x: OrderedInvokerHealth, y: OrderedInvokerHealth) => x.priority.priority - y.priority.priority) ++ _
+        TreeSet.empty[OrderedInvokerHealth]((x: OrderedInvokerHealth, y: OrderedInvokerHealth) =>
+          (x.priority.priority - y.priority.priority) match{
+            case 0 => x.invokerHealth.id.instance - y.invokerHealth.id.instance
+            case value if value != 0 => value.toInt
+          } ) ++ _
       }
   }
 

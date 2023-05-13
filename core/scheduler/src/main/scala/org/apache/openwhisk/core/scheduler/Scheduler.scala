@@ -480,4 +480,5 @@ case class SchedulingSupervisorConfig(enableSupervisor: Boolean,
                                       grade: Int,
                                       activationPolicy: String,
                                       maxActivationConcurrency: Int,
-                                      acceptPeriodInMillis: Long)
+                                      acceptPeriodInMillis: Long,
+                                      invokerPriorityPolicy: String)

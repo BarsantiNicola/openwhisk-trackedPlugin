@@ -95,19 +95,6 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           invokers.foreach(sendDeletionContainerToInvoker(messagingProducer, _, msg))
         }
 
-    case ContainersDeletion(containersToDrop, invocationNamespace, fqn, revision, whiskActionMetaData) =>
-      getInvokers(invocationNamespace, fqn, revision)
-        .map { invokers =>
-          val msg = ContainersDeletionMessage(
-            TransactionId.containerDeletion,
-            containersToDrop,
-            invocationNamespace,
-            fqn,
-            revision,
-            whiskActionMetaData)
-          invokers.foreach(sendDeletionContainersToInvoker(messagingProducer, _, msg))
-        }
-
     case rescheduling: ReschedulingCreationJob =>
       val msg = rescheduling.toCreationMessage(schedulerInstanceId, rescheduling.retry + 1)
       createContainer(
@@ -163,6 +150,7 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           logging.error(this, "there is no available invoker to schedule.")
           msgs.foreach(ContainerManager.sendState(_, NoAvailableInvokersError, NoAvailableInvokersError))
         } else {
+
           val (coldCreations, warmedCreations) =
             ContainerManager.filterWarmedCreations(warmedContainers, inProgressWarmedContainers, invokers, msgs)
 
@@ -245,34 +233,6 @@ class ContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
     }
   }
 
-  def getInvokers(invocationNamespace: String,
-                  fqn: FullyQualifiedEntityName,
-                  currentRevision: DocRevision): Future[List[Int]] = {
-    val namespacePrefix = containerPrefix(ContainerKeys.namespacePrefix, invocationNamespace, fqn)
-    val warmedPrefix = containerPrefix(ContainerKeys.warmedPrefix, invocationNamespace, fqn)
-
-    for {
-      existing <- etcdClient
-        .getPrefix(namespacePrefix)
-        .map { res =>
-          res.getKvsList.asScala.map { kv =>
-            parseExistingContainerKey(namespacePrefix, kv.getKey)
-          }
-        }
-      warmed <- etcdClient
-        .getPrefix(warmedPrefix)
-        .map { res =>
-          res.getKvsList.asScala.map { kv =>
-            parseWarmedContainerKey(warmedPrefix, kv.getKey)
-          }
-        }
-    } yield {
-      (existing ++ warmed)
-        .groupBy(k => k.invokerId) // remove duplicated value
-        .map(_._2.head.invokerId)
-        .toList
-    }
-  }
   /**
    * existingKey format: {tag}/namespace/{invocationNamespace}/{namespace}/({pkg}/)/{name}/{revision}/invoker{id}/container/{containerId}
    */

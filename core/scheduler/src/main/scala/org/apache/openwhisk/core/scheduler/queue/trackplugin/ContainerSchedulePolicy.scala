@@ -118,6 +118,7 @@ case class Steps(stepSize: Int) extends AsRequested {
     val systemFree = requestIar + enqueuedRequests == 0
     def outsideScope(value: Int): Boolean = totalContainers +inCreationContainers - value == 0 ||
       totalContainers +inCreationContainers - value == math.max(readyWorkers,minWorkers)
+    def maxBounded(value: Int): Boolean = totalContainers + inCreationContainers + stepSize > maxWorkers && value < stepSize
 
     super.grant(minWorkers,
                 readyWorkers,
@@ -129,13 +130,9 @@ case class Steps(stepSize: Int) extends AsRequested {
                 enqueuedRequests,
                 incomingRequests ) match {
 
-      case DecisionResults(AddContainer, value ) if value>=stepSize => DecisionResults( AddContainer, stepSize )
+      case DecisionResults(AddContainer, value) if maxBounded(value) => DecisionResults(AddContainer, maxWorkers-totalContainers-inCreationContainers)
 
-      case DecisionResults(AddContainer, _ ) =>
-        if( totalContainers + inCreationContainers + stepSize >= maxWorkers ) {
-          DecisionResults(AddContainer, maxWorkers - totalContainers - inCreationContainers)
-        }else
-          DecisionResults(AddContainer, stepSize )
+      case DecisionResults(AddContainer, _ ) => DecisionResults( AddContainer, stepSize )
 
       case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size > stepSize => DecisionResults(RemoveReadyContainer(containers.take(stepSize)), 0)
       case DecisionResults(RemoveReadyContainer(containers), 0 ) if containers.size == stepSize => DecisionResults(RemoveReadyContainer(containers), 0)

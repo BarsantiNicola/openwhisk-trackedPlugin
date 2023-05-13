@@ -29,6 +29,7 @@ import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.http.Messages
 
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
@@ -65,7 +66,7 @@ class ContainerMessageConsumer(
         implicit val transid: TransactionId = creation.transid
         logging
           .info(this, s"container creation message for ${creation.invocationNamespace}/${creation.action} is received")
-
+        ContainerMessageConsumer.setId(invokerInstanceId.instance)
         val createContainer = for {
           identity <- Identity.get(authStore, EntityName(creation.invocationNamespace))
           action <- WhiskAction
@@ -143,5 +144,21 @@ class ContainerMessageConsumer(
 
   def close(): Unit = {
     feed ! GracefulShutdown
+  }
+}
+
+object ContainerMessageConsumer{
+  private val containerCount: AtomicInteger = new AtomicInteger(0)
+  private var invokerInstanceId:Int = 0
+
+  def setId(id: Int): Unit = invokerInstanceId = id
+  def incrementAndPrint()(implicit logging: Logging): Unit = {
+    if( containerCount.get() < 8)
+      logging.info(this, s"[Framework-Analysis][Data] {'kind': 'invokers-container-counter', 'invoker': ${invokerInstanceId}, 'memory':'${containerCount.incrementAndGet()}', 'timestamp': ${System.currentTimeMillis()}}")
+  }
+
+  def decrementAndPrint()(implicit logging: Logging): Unit = {
+    if(containerCount.get() > 0 )
+      logging.info(this, s"[Framework-Analysis][Data] {'kind': 'invokers-container-counter', 'invoker': ${invokerInstanceId}, 'memory':'${containerCount.decrementAndGet()}', 'timestamp': ${System.currentTimeMillis()}}")
   }
 }

@@ -26,10 +26,11 @@ import com.ibm.etcd.client.kv.KvClient.Watch
 import com.ibm.etcd.client.kv.WatchUpdate
 import com.ibm.etcd.client.{EtcdClient => Client}
 import common.StreamLogging
+import org.apache.openwhisk.core.entity.Parameters
 import org.apache.openwhisk.core.etcd.EtcdClient
 import org.apache.openwhisk.core.scheduler.SchedulingSupervisorConfig
 import org.apache.openwhisk.core.scheduler.queue.{AddContainer, DecisionResults, Skip}
-import org.apache.openwhisk.core.scheduler.queue.trackplugin.{QueueSupervisor, RemoveReadyContainer, StateInformation, StateRegistry, TrackQueueSnapshot, UpdateState}
+import org.apache.openwhisk.core.scheduler.queue.trackplugin.{InvokerUsage, QueueSupervisor, RemoveReadyContainer, StateInformation, StateRegistry, TrackQueueSnapshot, UpdateState}
 import org.apache.openwhisk.core.service.{WatcherService, mockWatchUpdate}
 import org.junit.runner.RunWith
 import org.scalamock.scalatest.MockFactory
@@ -65,8 +66,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage minWorkers, maxWorkers, readyWorkers equal to 0" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 0, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 0, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
     supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4, None) shouldBe DecisionResults(Skip,0)
     supervisor.elaborate(parameters._1,parameters._2,parameters._3+1,parameters._4, None) shouldBe DecisionResults(Skip,0)
@@ -76,8 +77,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage minWorkers, maxWorkers, readyWorkers equal to 1" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 1, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 1, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -87,8 +88,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage minWorkers, maxWorkers, readyWorkers equal to n" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 5, 5, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 5, 5, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 5)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -98,8 +99,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage containers using only maxWorkers" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
@@ -114,8 +115,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage containers using maxWorkers and minWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 2, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 2, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -131,8 +132,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage containers using using maxWorkers and readyWorkers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 0, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
@@ -148,8 +149,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Manage containers using using maxWorkers minWorkers and readyWorkers in every possible combination" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 1, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 5, 1, 2, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
@@ -165,22 +166,22 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Add containers only on necessity" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 , "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
-    supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4, None) shouldBe DecisionResults(AddContainer,2)
+    supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4, None) shouldBe DecisionResults(AddContainer,1)
     supervisor.elaborate(parameters._1,parameters._2,parameters._3,parameters._4, None) shouldBe DecisionResults(Skip,0)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3+1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
   }
 
   it should "Wait to have some ready containers to remove them" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 , "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 1, 1, supervisor)
-    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(parameters._1, parameters._2, parameters._3+ 3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3+ 3, parameters._4, None) shouldBe DecisionResults(AddContainer, 3)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3+ 3, parameters._4, None) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 5, parameters._4, None) shouldBe DecisionResults(Skip, 0)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -191,8 +192,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Respect the ready containers threshold" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,2, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,2, "AsRequested", 0, 0, "AcceptAll", 2, 500 , "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3+1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
@@ -209,8 +210,8 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Respect the minimum containers threshold" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,2,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,2,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 , "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3 + 1, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -226,23 +227,23 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   it should "Remove containers only if there are sufficient ready containers" in {
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 )
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 4,0,0, "AsRequested", 0, 0, "AcceptAll", 2, 500 , "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 1, 1, 1, supervisor)
-    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3, parameters._4, None) shouldBe DecisionResults(Skip, 0)
-    supervisor.elaborate(parameters._1, parameters._2, parameters._3+3, parameters._4, None) shouldBe DecisionResults(AddContainer, 2)
+    supervisor.elaborate(parameters._1, parameters._2, parameters._3+3, parameters._4, None) shouldBe DecisionResults(AddContainer, 3)
     supervisor.elaborate(parameters._1, parameters._2, parameters._3+1, parameters._4, None) shouldBe DecisionResults(Skip,0)
     supervisor.elaborate(parameters._1++Set("A"), parameters._2, parameters._3+1, parameters._4++Set("A"), None) shouldBe DecisionResults(Skip,0)
-    supervisor.elaborate(parameters._1++Set("A","B","C"), parameters._2, parameters._3+1, parameters._4++Set("A","B","C"), None) shouldBe DecisionResults(Skip,0)
-    supervisor.elaborate(parameters._1++Set("A","B","C","D"), parameters._2, parameters._3+1, parameters._4++Set("A","B","C"), None) shouldBe DecisionResults(Skip,0)
-    supervisor.elaborate(parameters._1++Set("A","B","C","D"), parameters._2, parameters._3+1, parameters._4++Set("A","B","C","D"), None) shouldBe DecisionResults(RemoveReadyContainer(Set("A")),0)
+    supervisor.elaborate(parameters._1++Set("A","B","C"), parameters._2, parameters._3+1, parameters._4++Set("A","B","C"), None) shouldBe DecisionResults(RemoveReadyContainer(Set("A")),0)
+    supervisor.elaborate(parameters._1++Set("B","C","D"), parameters._2, parameters._3+1, parameters._4++Set("B","C","D"), None) shouldBe DecisionResults(RemoveReadyContainer(Set("B")),0)
+    supervisor.elaborate(parameters._1++Set("C","D"), parameters._2, parameters._3+1, parameters._4++Set("C","D"), None) shouldBe DecisionResults(Skip,0)
   }
 
   it should "React to a dynamic change of the parameters" in{
     val stateRegistry: StateRegistry = new MockStateRegistry(namespace, action)
-    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500)
-    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, stateRegistry)
+    val config = SchedulingSupervisorConfig(enableSupervisor = true, 1, 1, 0, "AsRequested", 0, 0, "AcceptAll", 2, 500, "Consolidation")
+    val supervisor: QueueSupervisor = new QueueSupervisor(namespace, action, config, Parameters.apply(), stateRegistry, etcdClient)
     val parameters: (Set[String], Int, Int, Set[String]) = createEnv(0, 0, 0, 0, 0, 0, supervisor)
     supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4, None) shouldBe DecisionResults(AddContainer, 1)
     supervisor.elaborate(parameters._1, parameters._2, 1, parameters._4, None) shouldBe DecisionResults(Skip, 0)
@@ -309,7 +310,7 @@ class AsRequestedPolicyTests extends TestKit(ActorSystem("WatcherService"))
 
   class MockStateRegistry(namespace: String, action: String) extends StateRegistry(namespace,action){
 
-    override def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String ): Unit = {
+    override def publishUpdate(value: TrackQueueSnapshot, iar: Int, maxWorkers: Int, minWorkers: Int, readyWorkers: Int, containerPolicy: String, activationPolicy: String, values: List[InvokerUsage] ): Unit = {
     }
 
     override def clean(): Unit = {}
