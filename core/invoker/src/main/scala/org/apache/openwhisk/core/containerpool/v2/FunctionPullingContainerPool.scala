@@ -24,6 +24,7 @@ import org.apache.openwhisk.core.connector._
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
+import org.apache.openwhisk.core.invoker.ContainerMessageConsumer
 import org.apache.openwhisk.http.Messages
 import spray.json.DefaultJsonProtocol
 
@@ -219,6 +220,7 @@ class FunctionPullingContainerPool(
               takeWarmedContainer(executable, create.invocationNamespace, create.revision)
                 .map(container => (container, "warmed"))
                 .orElse {
+                  ContainerMessageConsumer.incrementAndPrint()
                   takeContainer(executable)
                 }
             handleChosenContainer(create, executable, createdContainer)
@@ -289,6 +291,7 @@ class FunctionPullingContainerPool(
             && data.revision <= oldRevision
             && container.compareTo(data.container.containerId.asString) == 0) {
             logging.info( this, s"Shutting down ${data.container.containerId.asString}")
+            ContainerMessageConsumer.decrementAndPrint()
             proxy ! DropContainer
           }
         }
@@ -304,6 +307,7 @@ class FunctionPullingContainerPool(
                 && warmData.revision <= oldRevision
                 && container.compareTo(warmData.container.containerId.asString) == 0 =>
               logging.info( this, s"Shutting down warm: ${warmData.container.containerId.asString}")
+              ContainerMessageConsumer.decrementAndPrint()
               proxy ! DropContainer
 
             case initializedData: InitializedData
@@ -311,6 +315,7 @@ class FunctionPullingContainerPool(
                 && initializedData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
                 && container.compareTo(initializedData.container.containerId.asString) == 0 =>
               logging.info( this, s"Shutting down init: ${initializedData.container.containerId.asString}")
+              ContainerMessageConsumer.decrementAndPrint()
               proxy ! DropContainer
 
             case _ => // Other actions are ignored.
@@ -372,6 +377,7 @@ class FunctionPullingContainerPool(
         val container = takeWarmedContainer(data.action, data.invocationNamespace, data.revision)
           .map(container => (container, "warmed"))
           .orElse {
+            ContainerMessageConsumer.incrementAndPrint()
             takeContainer(data.action)
           }
         handleChosenContainer(msg, data.action, container)
@@ -745,6 +751,7 @@ class FunctionPullingContainerPool(
           create.rpcPort,
           create.transid)
         inProgressPool = inProgressPool + (proxy -> data)
+
         logContainerStart(create, executable.toWhiskAction, containerState)
 
       case None =>

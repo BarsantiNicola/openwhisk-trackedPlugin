@@ -250,14 +250,8 @@ class TrackedFunctionPullingContainerProxy(
   // this is for first invocation, once the first invocation is over we are ready to trigger getActivation for action concurrency
   when(ClientCreated) {
 
-    case Event(DropContainer, data: InitializedData) =>
+    case Event(DropContainer, _) =>
       timedOut = true
-      cleanUp(
-        data.container,
-        data.invocationNamespace,
-        data.action.fullyQualifiedName(withVersion = true),
-        data.action.rev,
-        Some(data.clientProxy))
       stay
 
     // 1. request activation message to client
@@ -362,10 +356,9 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Rescheduling) {
 
-    case Event(DropContainer, data: ReschedulingData) =>
+    case Event(DropContainer, _) =>
       timedOut = true
-      data.container.suspend()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
-      goto(Pausing)
+      stay
 
     case Event(res: RescheduleResponse, data: ReschedulingData) =>
       implicit val transId: TransactionId = data.resumeRun.msg.transid
@@ -401,8 +394,7 @@ class TrackedFunctionPullingContainerProxy(
 
     case Event(DropContainer, data: WarmData) =>
       timedOut = true
-      data.container.suspend()(TransactionId.invokerNanny).map(_ => ContainerPaused).pipeTo(self)
-      goto(Pausing)
+      stay
 
     // Run was successful.
     // 1. request activation message to client

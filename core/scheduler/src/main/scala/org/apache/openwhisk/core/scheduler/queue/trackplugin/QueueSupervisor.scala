@@ -75,20 +75,24 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   // Counters for internal functionalities
   private[QueueSupervisor] var rejectedRequests = new AtomicInteger(0)    //  counter of the rejected activations in last 1m
   private[QueueSupervisor] val acceptedRequests = new AtomicInteger(0)    //  last minute arrivals(used to compute iar)
+  private[QueueSupervisor] var associations : Set[ContainerInvoker] = Set.empty[ContainerInvoker]
+
   implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0) //  counter of the containers in progress creations
 
   //  Timers for periodic tasks execution
   private[QueueSupervisor] var schedulerTimer = new Timer // periodic scheduler execution
   private[QueueSupervisor] val metricsTimer = new Timer    // periodic metrics update execution
-  private var schedulerPeriod: Duration = Duration(1000, MILLISECONDS) //  can be used to change runtime the period of scheduling
+  private var schedulerPeriod: Duration = Duration(100, MILLISECONDS) //  can be used to change runtime the period of scheduling
 
   //  Internal variables
   private var maxAddingTime : Option[Long] = None  //  time used to identify an error(system unable to satisfy the containers creations)
   private var executionTime : Option[Double] = None  // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
   private val creationTme : Double = 500  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+  private var waitToMake : Long = 0
   private var onFlushTimeout : Option[Long] = None
   private var invokersState : Option[List[InvokerUsage]] = None
   private val gson = new Gson()
+
 
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
@@ -134,7 +138,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   if( annotations.getAs[Boolean]("reactive").getOrElse(true))
       schedulerTimer.scheduleAtFixedRate( new TimerTask{
           def run(): Unit = schedule( stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
-      }, 1000, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
+      }, 100, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
 
 
   invokerUpdate
@@ -209,6 +213,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def initStrategy(): DecisionResults = {
 
     inProgressCreations.incrementAndGet()
+    waitToMake = System.currentTimeMillis() + 2000
     DecisionResults(AddInitialContainer, 1)
 
   }
@@ -372,9 +377,29 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
       case DecisionResults(AddContainer, value) =>
-        inProgressCreations.addAndGet(value)
-        maxAddingTime = Option(System.currentTimeMillis()+300000)  // set a limit of 5m for the containers creation
-        DecisionResults(AddContainer,value)
+        if( waitToMake > System.currentTimeMillis())
+          DecisionResults(Skip,0)
+        else {
+          waitToMake = System.currentTimeMillis() + 2000
+          inProgressCreations.addAndGet(value)
+          maxAddingTime = Option(System.currentTimeMillis() + 300000) // set a limit of 5m for the containers creation
+          DecisionResults(AddContainer, value)
+        }
+      case DecisionResults(RemoveReadyContainer(removing),_) =>
+        if( waitToMake > System.currentTimeMillis())
+          DecisionResults(Skip,0)
+        else {
+          waitToMake = System.currentTimeMillis() + 2000
+          val result = invokerPriorityPolicy.selectRemove(readyContainers, removing.size, associations)
+          //for (r <- result)
+          //  for( a <- associations)
+          //    if( a.containerId.compareTo(r) == 0 )
+          //      associations -= a
+          if (result.isEmpty)
+            DecisionResults(Skip, 0)
+          else
+            DecisionResults(RemoveReadyContainer(result), 0)
+        }
       case value => value
     }
   }
@@ -499,6 +524,8 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       etcdClient.put( s"$namespace-$action-priority-${priority.invokerId}", priority.priority.toString)
     }
   }
+
+  def registryAssociation( containerId: String, invokerId: Int): Unit = associations += ContainerInvoker(containerId, invokerId)
 
 }
 

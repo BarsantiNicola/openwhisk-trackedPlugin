@@ -153,7 +153,6 @@ object ContainerMessageConsumer{
 
   def setId(id: Int): Unit = invokerInstanceId = id
   def incrementAndPrint()(implicit logging: Logging): Unit = {
-    if( containerCount.get() < 8)
       logging.info(this, s"[Framework-Analysis][Data] {'kind': 'invokers-container-counter', 'invoker': ${invokerInstanceId}, 'memory':'${containerCount.incrementAndGet()}', 'timestamp': ${System.currentTimeMillis()}}")
   }
 

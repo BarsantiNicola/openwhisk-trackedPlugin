@@ -42,11 +42,12 @@ import pureconfig.loadConfigOrThrow
 import spray.json._
 
 import java.time.{Duration, Instant}
+import java.util.{Timer, TimerTask}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.immutable.Queue
-import scala.collection.mutable
+import scala.collection.{mutable}
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future, Promise, duration}
 import scala.util.{Failure, Success}
@@ -77,6 +78,8 @@ case class TrackQueueSnapshot(initialized: Boolean,
                          recipient: ActorRef)
 
 case class RemoveReadyContainer( containers : Set[String] ) extends RequiredAction
+case class CancelRemovable(id: String)
+case object CheckContainers
 
 class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
                   private val etcdClient: EtcdClient,
@@ -131,6 +134,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var onRemoveIds: Set[String] = Set[String]()
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
+  private[queue] var onCheck = mutable.HashMap.empty[String,Long]
 
   private[queue] val in = new AtomicInteger(0)
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
@@ -168,15 +172,21 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
   // watch existing containers for action and namespace
   private val watchedKeys = Seq(inProgressContainerPrefixKey, existingContainerPrefixKey)
+  private val checkTimer = new Timer
 
   watchedKeys.foreach { key =>
     watcherService ! WatchEndpoint(key, "", isPrefix = true, watcherName, Set(PutEvent, DeleteEvent))
   }
 
+  checkTimer.scheduleAtFixedRate(new TimerTask {
+    override def run(): Unit = self ! CheckContainers
+  }, 150000, 150000)
+
   startWith(Uninitialized, NoData())
 
   when(Uninitialized) {
     case Event(Start, _) =>
+
 
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Initialization of TrackedMemoryQueue")
       logging.info(
@@ -227,11 +237,11 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] The container ${request.containerId} is requiring an activation")
 
       if (request.alive) {
-        if( onRemoveIds.contains(request.containerId)){
+        if( onRemoveIds.contains(request.containerId) || !containers.contains(request.containerId)){
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
         }else {
-          containers += request.containerId
+          onCheck.remove(request.containerId)
           handleActivationRequest(request)
         }
       } else {
@@ -285,8 +295,8 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
         }else {
+
           val (schedulerActor, droppingActor) = startMonitoring()
-          containers += request.containerId
           handleActivationRequest(request)
           goto(Running) using RunningData(schedulerActor, droppingActor)
         }
@@ -464,8 +474,19 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         filteredContainers.foreach{ containerId => removeDeletedContainerFromRequestBuffer(containerId)
                                                    containers -= containerId
                                                    onRemoveIds+=containerId
-                                                   }}
+        }}
       stay
+
+    case Event(CheckContainers, _) =>
+      containers.filter( p=> !onCheck.contains(p)).foreach( c => onCheck(c)=System.currentTimeMillis()+150000)
+      val removed = onCheck
+        .filter{ p => p._2 < System.currentTimeMillis()}
+        .map { value =>
+          containers -= value._1
+          value._1
+        }
+      removed.foreach(onCheck.remove(_))
+    stay
 
     // The queue endpoint is removed, trying to restore it.
     case Event(WatchEndpointRemoved(_, `leaderKey`, value, false), data) =>
@@ -504,6 +525,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       goto(Removed) using NoData()
 
     case Event(WatchEndpointRemoved(watchKey, key, _, true), _) =>
+      logging.info(this, s"[FRAMEWORK] Container removed $key")
       watchKey match {
         case `inProgressContainerPrefixKey` =>
           creationIds -= key.split("/").last
@@ -517,11 +539,17 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       stay
 
     case Event(WatchEndpointInserted(watchKey, key, _, true), _) =>
+      logging.info(this, s"[FRAMEWORK] Container created $key")
+      val splitted = key.split("/")
+      supervisor.registryAssociation(splitted.last, splitted(splitted.length-3).replace("invoker","").toInt)
       watchKey match {
         case `inProgressContainerPrefixKey` =>
-          creationIds += key.split("/").last
+          creationIds += splitted.last
         case `existingContainerPrefixKey` =>
-          containers += key.split("/").last
+          if( !onRemoveIds.contains(splitted.last)) {
+            containers += splitted.last
+            onCheck(splitted.last) = System.currentTimeMillis() + 150000
+          }
         case _ =>
       }
       stay
@@ -561,11 +589,11 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       implicit val tid: TransactionId = request.transactionId
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Get activation request ${request.containerId}")
       if (request.alive) {
-        if (onRemoveIds.contains(request.containerId)) {
+        if (onRemoveIds.contains(request.containerId) || !containers.contains(request.containerId)) {
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
         }else {
-          containers += request.containerId
+          onCheck.remove(request.containerId)
           handleActivationRequest(request)
         }
       } else {
@@ -573,7 +601,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         removeDeletedContainerFromRequestBuffer(request.containerId)
         sender ! GetActivationResponse(Left(NoActivationMessage()))
         containers -= request.containerId
-        onRemoveIds -= request.containerId
         stay
       }
 
@@ -697,7 +724,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case _ =>
       // logscheduler must be canceled when FSM is terminated
       logScheduler.cancel()
-
+      checkTimer.cancel()
       // the lifecycle of DecisionMaker conforms to the one of MemoryQueue
       actorSystem.stop(decisionMaker)
   }

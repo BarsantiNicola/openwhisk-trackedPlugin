@@ -17,15 +17,50 @@
 
 package org.apache.openwhisk.core.scheduler.queue.trackplugin
 
-abstract class InvokerPriorityPolicy {
 
-  def compute(usages: List[InvokerUsage]): List[InvokerPriority]
+import scala.collection.immutable.TreeSet
+
+case class ContainerInvoker(containerId: String, invokerId: Int)
+
+abstract class InvokerPriorityPolicy{
+
+  implicit val ordering: Ordering[InvokerPriority] = (x: InvokerPriority, y: InvokerPriority) => {
+    y.priority - x.priority match {
+      case 0 => y.invokerId - x.invokerId
+      case value if value != 0 => value.toInt
+    }
+  }
+
+  var priorities : TreeSet[InvokerPriority] = TreeSet.empty[InvokerPriority]
+
+  def compute(usages: List[InvokerUsage]): List[InvokerPriority] = {
+    priorities = TreeSet.empty[InvokerPriority] ++ computePriorities(usages)
+    priorities.toList
+  }
+
+  def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority]
+
+  def selectRemove(containers: Set[String], number: Int, associations: Set[ContainerInvoker]): Set[String] = {
+    var toRemove : Set[String] = Set.empty[String]
+    val availableAssociations = associations.filter( p => containers.contains(p.containerId))
+    for (priority <- priorities){
+      val filtered = availableAssociations.filter( _.invokerId == priority.invokerId).map{ _.containerId }
+      filtered.size + toRemove.size - number match{
+        case 0 => return toRemove ++ filtered
+        case value if value < 0 => toRemove = toRemove ++ filtered
+        case value if value > 0 => return toRemove ++ filtered.take(value)
+      }
+    }
+    if(toRemove.isEmpty && containers.nonEmpty)
+      toRemove = containers.take(number)
+    toRemove
+  }
 
   override def toString = "InvokerPriorityPolicy"
 }
 
 case class Consolidate() extends  InvokerPriorityPolicy {
-  override def compute(usages: List[InvokerUsage]): List[InvokerPriority] = {
+  override def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority] = {
     var values = Set.empty[Long]
     usages.foreach(usage => values += usage.usage) //  Sets automatically removes duplicated
     val ordered = values.toList.sorted    //  move to list to be able to use indexOf function
@@ -33,11 +68,12 @@ case class Consolidate() extends  InvokerPriorityPolicy {
   }
 
   override def toString = "Consolidate"
+
 }
 
 case class Balance() extends  InvokerPriorityPolicy {
 
-  override def compute(usages: List[InvokerUsage]): List[InvokerPriority] = {
+  override def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority] = {
     var values = Set.empty[Long]
     usages.foreach(usage => values += usage.usage)
     val ordered = values.toList.sorted(Ordering.Long.reverse)
