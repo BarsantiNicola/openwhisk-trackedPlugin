@@ -34,6 +34,14 @@ import scala.concurrent.duration.{Duration,  SECONDS}
 import scala.concurrent.{Await, ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success}
 
+/**
+ * Alternative version of ContainerManager, differences from the native version:
+ * - added the management of ContainersDeletion message for the removal of containers identified by their ids
+ * - changed the schedule function to consider a set of priorities assigned to the invokers
+ * - changed the chooseInvokerFromCandidates to consider a set of priorities assigned to the invokers
+ * - added getInvokers function to obtain all the invokers independently from their usability
+ * - added orderInvokers to reorder invokers based on a set of priorities obtained from etcd
+ */
 class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
                               provider: MessagingProvider,
                               schedulerInstanceId: SchedulerInstanceId,
@@ -76,6 +84,8 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           invokers.foreach(sendDeletionContainerToInvoker(messagingProducer, _, msg))
         }
 
+    //  case to remove containers identified by their ids, we simply send the request to all the invokers which will
+    //  remove them in case are present TODO identify the invoker maintaining the container
     case ContainersDeletion(containersToDrop, invocationNamespace, fqn, revision, whiskActionMetaData) =>
       getInvokers(invocationNamespace, fqn)
         .map { invokers =>
@@ -148,7 +158,9 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           val (coldCreations, warmedCreations) =
             TrackedContainerManager.filterWarmedCreations(warmedContainers, inProgressWarmedContainers, invokers, msgs)
 
-          // handle warmed creation
+          // i haven't changed the management of warmed creation(apart for giving priority to low invoker ids), we wanna
+          // use all the warmed containers present independently from their position(their are already created, we don't have
+          // to reordering them, this decision has already being done during their creation)
           val chosenInvokers: immutable.Seq[Option[(Int, ContainerCreationMessage)]] = warmedCreations.map {
             warmedCreation =>
               // update the in-progress map for warmed containers.
@@ -181,7 +193,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
           // handle cold creations
           if (coldCreations.nonEmpty) {
             TrackedContainerManager
-              .schedule(updatedInvokers, coldCreations.map(_._1), memory)
+              .schedule(updatedInvokers, coldCreations.map(_._1), memory) //  the schedule is modified to give the invoker with lower priority value
               .map { pair =>
                 pair.invokerId match {
                   // an invoker is assigned for the msg
@@ -230,6 +242,8 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
     }
   }
 
+  //  retrieve all the available invokers independently from their position. It is used during container removal in order
+  //  to have all the invokers
   def getInvokers(invocationNamespace: String,
                   fqn: FullyQualifiedEntityName): Future[List[Int]] = {
     val namespacePrefix = containerPrefix(ContainerKeys.namespacePrefix, invocationNamespace, fqn)
@@ -257,6 +271,7 @@ class TrackedContainerManager(jobManagerFactory: ActorRefFactory => ActorRef,
         .toList
     }
   }
+
   /**
    * existingKey format: {tag}/namespace/{invocationNamespace}/{namespace}/({pkg}/)/{name}/{revision}/invoker{id}/container/{containerId}
    */
@@ -604,6 +619,8 @@ object TrackedContainerManager{
     list
   }
 
+  //  choose the invoker using a priority retrieved from etcd. The priority is defined by the QueueSupervisor using the
+  //  free memory available on the invokers
   protected[container] def chooseInvokerFromCandidates(candidates: List[InvokerHealth], msg: ContainerCreationMessage)(
     implicit logging: Logging, etcdClient: EtcdClient, executor: ExecutionContext): ScheduledPair = {
     val requiredMemory = msg.whiskActionMetaData.limits.memory
@@ -613,18 +630,18 @@ object TrackedContainerManager{
       ScheduledPair(msg, invokerId = None, Some(NoAvailableResourceInvokersError))
     } else {
       val orderedCandidates : TreeSet[OrderedInvokerHealth] = Await.result(orderInvokersByPriority(msg.invocationNamespace, msg.action.name.name, candidates), Duration(5,SECONDS))
-      orderedCandidates.foreach{v => logging.info(this, s"ORDERED: ${v.priority} ${v.invokerHealth == null}")}
       val instance = orderedCandidates.firstKey
       if (instance.invokerHealth.id.userMemory.toMB < requiredMemory.megabytes) {
-        chooseInvokerFromOrderedCandidates((orderedCandidates - instance), msg)
+        chooseInvokerFromOrderedCandidates(orderedCandidates - instance, msg) //  here we make the priority selection
       } else {
         ScheduledPair(msg, invokerId = Option(instance.invokerHealth.id))
       }
     }
   }
 
+  //  function defined to optimize the memory usage during the invoker selection(it is tail recurvive having dropped the reordering)
   @tailrec
-  protected[container] def chooseInvokerFromOrderedCandidates(candidates: TreeSet[OrderedInvokerHealth], msg: ContainerCreationMessage)(
+  private def chooseInvokerFromOrderedCandidates(candidates: TreeSet[OrderedInvokerHealth], msg: ContainerCreationMessage)(
     implicit logging: Logging, etcdClient: EtcdClient, executor: ExecutionContext): ScheduledPair = {
     val requiredMemory = msg.whiskActionMetaData.limits.memory
     if (candidates.isEmpty) {
@@ -641,27 +658,29 @@ object TrackedContainerManager{
       }
   }
 
-  case class OrderedInvokerHealth( invokerHealth: InvokerHealth, priority: InvokerPriority)
+  private case class OrderedInvokerHealth(invokerHealth: InvokerHealth, priority: InvokerPriority)
+
+  //  function which reorder the invokers basing on a set of priorities obtained from etcd(placed by the QueueSupervisor)
   private def orderInvokersByPriority(namespace: String, action: String, invokers: List[InvokerHealth])(implicit etcd: EtcdClient, ec: ExecutionContext, logging: Logging) : Future[TreeSet[OrderedInvokerHealth]] = {
     val mappedInvokers = Map.empty[Int, InvokerHealth] ++ invokers.map { invoker => invoker.id.instance -> invoker }
     etcd
-      .getPrefix(s"$namespace-$action-priority-")
+      .getPrefix(s"$namespace-$action-priority-") //  getting the priorities from etcd
       .map { _.getKvsList.asScala
           .map { kv =>
             {
               val id = kv.getKey.toStringUtf8.replace(s"$namespace-$action-priority-", "").toInt
-              mappedInvokers.get(id) match {
+              mappedInvokers.get(id) match {  //  creation of OrderedInvokerHealth(case class in which is defined the ordering pattern)
                 case Some(invokerhealth: InvokerHealth) => OrderedInvokerHealth(invokerhealth, InvokerPriority(id, kv.getValue.toStringUtf8.toInt))
                 case _ => OrderedInvokerHealth(null, InvokerPriority(id, -1))
               }
             }
-          }.filter( _.priority.priority != -1 )
+          }.filter( _.priority.priority != -1 ) //  dropping the invokers in error states
       }.map {
         TreeSet.empty[OrderedInvokerHealth]((x: OrderedInvokerHealth, y: OrderedInvokerHealth) =>
-          (x.priority.priority - y.priority.priority) match{
-            case 0 => x.invokerHealth.id.instance - y.invokerHealth.id.instance
+          x.priority.priority - y.priority.priority match{
+            case 0 => x.invokerHealth.id.instance - y.invokerHealth.id.instance //  if they have same priority we discriminate using ids
             case value if value != 0 => value.toInt
-          } ) ++ _
+          } ) ++ _  //  reordering of the invokers
       }
   }
 

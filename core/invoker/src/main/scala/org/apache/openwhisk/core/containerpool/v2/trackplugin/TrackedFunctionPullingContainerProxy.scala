@@ -53,6 +53,11 @@ import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success, Try}
 
+/**
+ * Alternative version of FunctionPullingContainerProxy, differences from the native version:
+ * - removed automatic destruction of running idle containers
+ * - added new message "DropContainer" from the destruction of the container on scheduler' request
+ */
 class TrackedFunctionPullingContainerProxy(
   factory: (TransactionId,
             String,
@@ -250,6 +255,7 @@ class TrackedFunctionPullingContainerProxy(
   // this is for first invocation, once the first invocation is over we are ready to trigger getActivation for action concurrency
   when(ClientCreated) {
 
+    //  we cannot destroy directly the container in this state, we set the timedOut and it will be checked on Running State
     case Event(DropContainer, _) =>
       timedOut = true
       stay
@@ -356,6 +362,9 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Rescheduling) {
 
+    //  we set the timedOut flag, it is important to do the removal in this way to not interfere with the interactions
+    //  of the containers with the scheduler(it will be the container itself, when free, to decide to remove. Otherwise
+    //  we generate two flows of control that can interfere between each other)
     case Event(DropContainer, _) =>
       timedOut = true
       stay
@@ -392,7 +401,10 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Running) {
 
-    case Event(DropContainer, data: WarmData) =>
+    //  we set the timedOut flag, it is important to do the removal in this way to not interfere with the interactions
+    //  of the containers with the scheduler(it will be the container itself, when free, to decide to remove. Otherwise
+    //  we generate two flows of control that can interfere between each other)
+    case Event(DropContainer, _: WarmData) =>
       timedOut = true
       stay
 
@@ -523,8 +535,8 @@ class TrackedFunctionPullingContainerProxy(
 
   when(Pausing) {
 
+    //  container already paused, just do nothing
     case Event(DropContainer, _) =>
-      timedOut = true
       stay
 
     case Event(ContainerPaused, data: WarmData) =>
@@ -675,6 +687,7 @@ class TrackedFunctionPullingContainerProxy(
 
   whenUnhandled {
 
+    //  i don't think it can be received, just to cover the possibility giving a default reaction
     case Event(DropContainer, _) =>
       timedOut = true
       stay

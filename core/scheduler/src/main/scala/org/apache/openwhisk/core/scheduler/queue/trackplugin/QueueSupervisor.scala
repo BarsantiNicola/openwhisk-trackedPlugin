@@ -87,14 +87,17 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   //  Internal variables
   private var maxAddingTime : Option[Long] = None  //  time used to identify an error(system unable to satisfy the containers creations)
   private var executionTime : Option[Double] = None  // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
-  private val creationTme : Double = 500  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
-  private var waitToMake : Long = 0
+  private val creationTime : Double = 1000  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+  private var waitToDestroy : Long = 0
+  private var waitToCreate : Long = 0
   private var onFlushTimeout : Option[Long] = None
   private var invokersState : Option[List[InvokerUsage]] = None
   private val gson = new Gson()
-
-
+  private val safeCreationTime = 250
+  private val safeRemoveTime = 5000
   var iar: Double = 0                // [Metric] average inter-arrival rate of requests
+
+
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
   private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = annotations
     .getAs[String]("container-policy")
@@ -213,7 +216,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def initStrategy(): DecisionResults = {
 
     inProgressCreations.incrementAndGet()
-    waitToMake = System.currentTimeMillis() + 2000
+    waitToDestroy = System.currentTimeMillis() + safeRemoveTime
     DecisionResults(AddInitialContainer, 1)
 
   }
@@ -342,8 +345,8 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String], et: Option[Double]) : DecisionResults = {
 
     executionTime = et match{
-      case Some(value:Double) => Option(60000/value)
-      case _ => Option(60000/creationTme)
+      case Some(value:Double) => Option(60000/(value+creationTime))
+      case _ => Option(60000/creationTime)
     }
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
@@ -377,24 +380,21 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
       case DecisionResults(AddContainer, value) =>
-        if( waitToMake > System.currentTimeMillis())
+        if( waitToCreate > System.currentTimeMillis())
           DecisionResults(Skip,0)
         else {
-          waitToMake = System.currentTimeMillis() + 2000
+          waitToDestroy = System.currentTimeMillis() + safeRemoveTime
           inProgressCreations.addAndGet(value)
           maxAddingTime = Option(System.currentTimeMillis() + 300000) // set a limit of 5m for the containers creation
           DecisionResults(AddContainer, value)
         }
       case DecisionResults(RemoveReadyContainer(removing),_) =>
-        if( waitToMake > System.currentTimeMillis())
+        if( waitToDestroy > System.currentTimeMillis())
           DecisionResults(Skip,0)
         else {
-          waitToMake = System.currentTimeMillis() + 2000
+          waitToCreate = System.currentTimeMillis() + safeCreationTime
+          waitToDestroy = System.currentTimeMillis() + safeRemoveTime
           val result = invokerPriorityPolicy.selectRemove(readyContainers, removing.size, associations)
-          //for (r <- result)
-          //  for( a <- associations)
-          //    if( a.containerId.compareTo(r) == 0 )
-          //      associations -= a
           if (result.isEmpty)
             DecisionResults(Skip, 0)
           else

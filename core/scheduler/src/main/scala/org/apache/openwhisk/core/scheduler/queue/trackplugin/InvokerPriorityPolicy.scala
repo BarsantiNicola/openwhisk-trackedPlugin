@@ -22,8 +22,12 @@ import scala.collection.immutable.TreeSet
 
 case class ContainerInvoker(containerId: String, invokerId: Int)
 
+/**
+ * Basic class for the development of policies for the invokers priority management
+ */
 abstract class InvokerPriorityPolicy{
 
+  //  ordering used for the InvokersPriority, can be redefined if needed
   implicit val ordering: Ordering[InvokerPriority] = (x: InvokerPriority, y: InvokerPriority) => {
     y.priority - x.priority match {
       case 0 => y.invokerId - x.invokerId
@@ -31,27 +35,31 @@ abstract class InvokerPriorityPolicy{
     }
   }
 
-  var priorities : TreeSet[InvokerPriority] = TreeSet.empty[InvokerPriority]
+  protected var priorities : TreeSet[InvokerPriority] = TreeSet.empty[InvokerPriority]
 
   def compute(usages: List[InvokerUsage]): List[InvokerPriority] = {
     priorities = TreeSet.empty[InvokerPriority] ++ computePriorities(usages)
     priorities.toList
   }
 
+  //  evaluation of invokers priorities, it is called periodically by the QueueSupervisor
   def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority]
 
+  //  selection of containers based on the invokers priorities, it is called during container removal
   def selectRemove(containers: Set[String], number: Int, associations: Set[ContainerInvoker]): Set[String] = {
-    var toRemove : Set[String] = Set.empty[String]
-    val availableAssociations = associations.filter( p => containers.contains(p.containerId))
-    for (priority <- priorities){
-      val filtered = availableAssociations.filter( _.invokerId == priority.invokerId).map{ _.containerId }
-      filtered.size + toRemove.size - number match{
+    var toRemove: Set[String] = Set.empty[String]
+    val availableAssociations = associations.filter(p => containers.contains(p.containerId))
+    for (priority <- priorities) {
+      val filtered = availableAssociations.filter(_.invokerId == priority.invokerId).map {
+        _.containerId
+      }
+      filtered.size + toRemove.size - number match {
         case 0 => return toRemove ++ filtered
         case value if value < 0 => toRemove = toRemove ++ filtered
         case value if value > 0 => return toRemove ++ filtered.take(value)
       }
     }
-    if(toRemove.isEmpty && containers.nonEmpty)
+    if (toRemove.isEmpty && containers.nonEmpty)
       toRemove = containers.take(number)
     toRemove
   }
@@ -59,6 +67,9 @@ abstract class InvokerPriorityPolicy{
   override def toString = "InvokerPriorityPolicy"
 }
 
+/**
+ * Consolidate the invokers usage, the more an invoker is used the higher is its associated priority(the lower is its value)
+ */
 case class Consolidate() extends  InvokerPriorityPolicy {
   override def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority] = {
     var values = Set.empty[Long]
@@ -71,6 +82,9 @@ case class Consolidate() extends  InvokerPriorityPolicy {
 
 }
 
+/**
+ * Balance the invokers usage, the more an invoker is used the lower is its priority(the higher is its value)
+ */
 case class Balance() extends  InvokerPriorityPolicy {
 
   override def computePriorities(usages: List[InvokerUsage]): List[InvokerPriority] = {

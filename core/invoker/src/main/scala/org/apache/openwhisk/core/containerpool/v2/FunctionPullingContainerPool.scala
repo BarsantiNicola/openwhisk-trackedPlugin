@@ -220,9 +220,9 @@ class FunctionPullingContainerPool(
               takeWarmedContainer(executable, create.invocationNamespace, create.revision)
                 .map(container => (container, "warmed"))
                 .orElse {
-                  ContainerMessageConsumer.incrementAndPrint()
                   takeContainer(executable)
                 }
+            ContainerMessageConsumer.incrementAndPrint()
             handleChosenContainer(create, executable, createdContainer)
           case None =>
             val message =
@@ -277,6 +277,8 @@ class FunctionPullingContainerPool(
         }
       })
 
+    // Added case for the removal of a container, it searches a matching id and send to its proxy the DropContainer
+    // message which will force the selected container to be removed
     case DeletionContainers(deletionMessage: ContainersDeletionMessage) =>
       val oldRevision = deletionMessage.revision
       val invocationNamespace = deletionMessage.invocationNamespace
@@ -291,7 +293,7 @@ class FunctionPullingContainerPool(
             && data.revision <= oldRevision
             && container.compareTo(data.container.containerId.asString) == 0) {
             logging.info( this, s"Shutting down ${data.container.containerId.asString}")
-            ContainerMessageConsumer.decrementAndPrint()
+            ContainerMessageConsumer.decrementAndPrint()  //  Added only for testing purpose, can be removed
             proxy ! DropContainer
           }
         }
@@ -307,7 +309,7 @@ class FunctionPullingContainerPool(
                 && warmData.revision <= oldRevision
                 && container.compareTo(warmData.container.containerId.asString) == 0 =>
               logging.info( this, s"Shutting down warm: ${warmData.container.containerId.asString}")
-              ContainerMessageConsumer.decrementAndPrint()
+              ContainerMessageConsumer.decrementAndPrint() //  Added only for testing purpose, can be removed
               proxy ! DropContainer
 
             case initializedData: InitializedData
@@ -315,7 +317,7 @@ class FunctionPullingContainerPool(
                 && initializedData.action.fullyQualifiedName(withVersion = false) == fqn.copy(version = None)
                 && container.compareTo(initializedData.container.containerId.asString) == 0 =>
               logging.info( this, s"Shutting down init: ${initializedData.container.containerId.asString}")
-              ContainerMessageConsumer.decrementAndPrint()
+              ContainerMessageConsumer.decrementAndPrint() //  Added only for testing purpose, can be removed
               proxy ! DropContainer
 
             case _ => // Other actions are ignored.
@@ -377,9 +379,9 @@ class FunctionPullingContainerPool(
         val container = takeWarmedContainer(data.action, data.invocationNamespace, data.revision)
           .map(container => (container, "warmed"))
           .orElse {
-            ContainerMessageConsumer.incrementAndPrint()
             takeContainer(data.action)
           }
+        ContainerMessageConsumer.incrementAndPrint()
         handleChosenContainer(msg, data.action, container)
       }
 

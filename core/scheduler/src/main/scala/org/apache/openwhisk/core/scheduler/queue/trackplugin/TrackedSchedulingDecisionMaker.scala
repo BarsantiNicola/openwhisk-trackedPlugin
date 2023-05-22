@@ -77,7 +77,7 @@ class TrackedSchedulingDecisionMaker(invocationNamespace: String, action: FullyQ
 
   override def postStop(): Unit = {
     super.postStop()
-    supervisor.clean()
+    supervisor.clean()  //  we need to cleanUp all the information when stopping the actor
   }
 }
 

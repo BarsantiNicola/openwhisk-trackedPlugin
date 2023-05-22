@@ -47,7 +47,7 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.immutable.Queue
-import scala.collection.{mutable}
+import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future, Promise, duration}
 import scala.util.{Failure, Success}
@@ -59,7 +59,16 @@ import scala.util.{Failure, Success}
 //  - it has to consider the removing of a queue the ending of its execution, in the case it will be not. It will be recreated
 //    from scratch
 
-// Data
+/**
+ * Alternative version of TrackedMemoryQueue, in order to introduce the QueueSupervisor control the following change has been made:
+ * - Changed the QueueSnapshot to TrackQueueSnapshot to include more information  needed by the QueueSupervisor
+ * - Changed the GetActivation, ActivationMessage to give the control to the QueueSupervisor on their acceptance
+ * - Added registration of container to notify to the QueueSupervisor their belonging invoker
+ * - Blocked automatic containers registration via GetActivation to prevent illecit containers registrations
+ * - Added onRemoveIds to block requests of containers going to be removed
+ * - Added periodic check of containers in order remove illegal containers registration(even with all the checks, still can happen,
+ *   and it is an unremovable behavior due to critical races between invokers and scheduler)
+ */
 case class TrackQueueSnapshot(initialized: Boolean,
                          incomingMsgCount: AtomicInteger,
                          currentMsgCount: Int,
@@ -78,9 +87,23 @@ case class TrackQueueSnapshot(initialized: Boolean,
                          recipient: ActorRef)
 
 case class RemoveReadyContainer( containers : Set[String] ) extends RequiredAction
-case class CancelRemovable(id: String)
+
 case object CheckContainers
 
+/**
+ * Alternative version of TrackedMemoryQueue, in order to introduce the QueueSupervisor control the following change has been made:
+ * - Changed the QueueSnapshot to TrackQueueSnapshot to include more information  needed by the QueueSupervisor
+ * - Changed the GetActivation, ActivationMessage to give the control to the QueueSupervisor on their acceptance
+ * - Added registration of container to notify to the QueueSupervisor their belonging invoker
+ * - Blocked automatic containers registration via GetActivation to prevent illecit containers registrations
+ * - Added onRemoveIds to block requests of containers going to be removed
+ * - Added periodic check of containers in order remove illegal containers registration(even with all the checks, still can happen,
+ *   and it is an unremovable behavior due to critical races between invokers and scheduler)
+ * It will be listed only the newly added parameters to the alternative class
+ * @param supervisor  The QueueSupervisor associated with the queue
+ * @param etcdClient  Needed to retrieve and store information on etcd
+ * @param queueConfig Configuration of the scheduler and the QueueSupervisor
+ */
 class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
                   private val etcdClient: EtcdClient,
                   private val durationChecker: DurationChecker,
@@ -132,9 +155,9 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   private var requestBuffer = mutable.PriorityQueue.empty[BufferedRequest]
   private[queue] var containers = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
   private[queue] var creationIds = java.util.concurrent.ConcurrentHashMap.newKeySet[String]().asScala
-  private[queue] var onRemoveIds: Set[String] = Set[String]()
+  private[queue] var onRemoveIds: Set[String] = Set[String]()  //  containers waiting to be removed
   private[queue] var queue = Queue.empty[TimeSeriesActivationEntry]
-  private[queue] var onCheck = mutable.HashMap.empty[String,Long]
+  private[queue] var onCheck = mutable.HashMap.empty[String,Long] //  containers on periodic check of their liveness
 
   private[queue] val in = new AtomicInteger(0)
   private[queue] val lastActivationPulledTime = new AtomicLong(Instant.now.toEpochMilli)
@@ -178,6 +201,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     watcherService ! WatchEndpoint(key, "", isPrefix = true, watcherName, Set(PutEvent, DeleteEvent))
   }
 
+  //  periodic check of allocated containers, if a container haven't send a getActivation request every 150s it will be considered dead
   checkTimer.scheduleAtFixedRate(new TimerTask {
     override def run(): Unit = self ! CheckContainers
   }, 150000, 150000)
@@ -237,10 +261,14 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] The container ${request.containerId} is requiring an activation")
 
       if (request.alive) {
+        //  if the container is tagged as "onRemove" or it isn't registered to the queue it will reject it
+        //  added to prevent illicit containers registration due to critical races(we have already remove it, but this messages
+        //  were on the fly)
         if( onRemoveIds.contains(request.containerId) || !containers.contains(request.containerId)){
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
         }else {
+          //  updating of the oncheck containers(received an activation)
           onCheck.remove(request.containerId)
           handleActivationRequest(request)
         }
@@ -251,6 +279,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     case Event(msg: ActivationMessage, _) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A new request is arrived ${msg.activationId}")
+      //  the decision is forwarded to the QueueSupervisor
       if (supervisor.handleActivation(msg, containers.size, requestBuffer.size, queue.size, in.get()))
         handleActivationMessage(msg)
       else {
@@ -261,7 +290,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(FailedCreationJob(creationId, _, _, _, error, message), RunningData(_, _)) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A Failure is happened on ${creationId.asString}: $message")
       creationIds -= creationId.asString
-      supervisor.failedJob()
+      supervisor.failedJob() //  we need to update the incomingCreations inside the QueueSupervisor or it will wait forever
       // when there is no container, it moves to the Flushing state as no activations can be invoked
       if (containers.isEmpty) {
         val isWhiskError = ContainerCreationError.whiskErrors.contains(error)
@@ -273,16 +302,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       stay
   }
 
-  // there is no timeout for this state as when there is no further message, it would move to the Running state again.
-  when(ActionThrottled) {
-
-    // since there are already too many activation messages, it drops the new messages
-    case Event(msg: ActivationMessage, ThrottledData(_, _)) =>
-      logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A new request is arrived ${msg.activationId}. It will be rejected")
-      completeErrorActivation(msg, tooManyConcurrentRequests, isWhiskError = queueConfig.failThrottleAsWhiskError)
-      stay
-  }
-
   when(Idle, stateTimeout = queueConfig.stopGrace) {
 
     case Event(request: GetActivation, _: NoActors) if request.action == action =>
@@ -291,6 +310,8 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] The container ${request.containerId} is requiring an activation")
 
       if (request.alive) {
+        //  if the container is tagged as "onRemove" it will be rejected, added to prevent illicit containers registration due
+        //  to critical races(we have already remove it, but this messages were on the fly or on processing)
         if (onRemoveIds.contains(request.containerId)) {
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
@@ -307,6 +328,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
 
     case Event(msg: ActivationMessage, _: NoActors) =>
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] A new request is arrived ${msg.activationId}")
+      //  the decision is forwarded to the QueueSupervisor
       if( supervisor.handleActivation(msg,containers.size, requestBuffer.size, queue.size, in.get())) {
         val (schedulerActor, droppingActor) = startMonitoring()
         handleActivationMessage(msg)
@@ -464,8 +486,9 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
   }
 
   whenUnhandled {
-
+    //  case for removing containers on QueueSupervisor demand
     case Event(RemoveReadyContainer(containersToDrop), _) =>
+      //  filtering the containers to not remove those who are executing requests
       val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(1) }.toSet
       val filteredContainers = containersToDrop.intersect( droppableContainers)
       if (filteredContainers.nonEmpty) {
@@ -473,12 +496,17 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         containerManager ! ContainersDeletion(filteredContainers, invocationNamespace, action, revision, actionMetaData)
         filteredContainers.foreach{ containerId => removeDeletedContainerFromRequestBuffer(containerId)
                                                    containers -= containerId
-                                                   onRemoveIds+=containerId
+                                                   onRemoveIds+=containerId  //  tag the container as "onRemove", its requests will be not accepted anymore
         }}
       stay
 
+    //  periodic liveness container check
     case Event(CheckContainers, _) =>
+      // we add all the missing containers to reschedule a new check(prevents that some containers misses the checks in somehow)
       containers.filter( p=> !onCheck.contains(p)).foreach( c => onCheck(c)=System.currentTimeMillis()+150000)
+
+      // an illegal container is present on "containers" but not on requestBuffer(it doesn't make GetActivation requests
+      // cause it is not really connected to the queue, it was just a critical condition on its removal)
       val removed = onCheck
         .filter{ p => p._2 < System.currentTimeMillis()}
         .map { value =>
@@ -525,7 +553,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       goto(Removed) using NoData()
 
     case Event(WatchEndpointRemoved(watchKey, key, _, true), _) =>
-      logging.info(this, s"[FRAMEWORK] Container removed $key")
       watchKey match {
         case `inProgressContainerPrefixKey` =>
           creationIds -= key.split("/").last
@@ -539,14 +566,14 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       stay
 
     case Event(WatchEndpointInserted(watchKey, key, _, true), _) =>
-      logging.info(this, s"[FRAMEWORK] Container created $key")
       val splitted = key.split("/")
       supervisor.registryAssociation(splitted.last, splitted(splitted.length-3).replace("invoker","").toInt)
       watchKey match {
         case `inProgressContainerPrefixKey` =>
-          creationIds += splitted.last
+          if( !onRemoveIds.contains(splitted.last)) // we do not accept a new creation of the same container until it has been removed
+            creationIds += splitted.last
         case `existingContainerPrefixKey` =>
-          if( !onRemoveIds.contains(splitted.last)) {
+          if( !onRemoveIds.contains(splitted.last)) { // we do not accept a new registration from the same container until it has been removed
             containers += splitted.last
             onCheck(splitted.last) = System.currentTimeMillis() + 150000
           }
@@ -567,7 +594,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       logging.info(
         this,
         s"[$invocationNamespace:$action:$stateName][$creationId] Got failed creation job with revision $revision and error $message.")
-      supervisor.failedJob()
+      supervisor.failedJob()  // we need to update the incomingCreation on supervisor
       stay()
 
     // common case for Running, NamespaceThrottled, ActionThrottled, Removing
@@ -668,6 +695,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case Event(msg: DecisionResults, _) =>
       val DecisionResults(result, num) = msg
       result match {
+
         case AddInitialContainer if num > 0 =>
           initialized = true
           val msgs = generateContainerCreationMessages(num)
@@ -676,20 +704,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         case AddContainer if num > 0 =>
           val msgs = generateContainerCreationMessages(num)
           containerManager ! ContainerCreation(msgs, memory, invocationNamespace)
-
-        case enable: EnableNamespaceThrottling =>
-          if (num > 0) {
-            val msgs = generateContainerCreationMessages(num)
-            containerManager ! ContainerCreation(msgs, memory, invocationNamespace)
-          }
-          self ! enable
-
-        case DisableNamespaceThrottling =>
-          if (num > 0) {
-            val msgs = generateContainerCreationMessages(num)
-            containerManager ! ContainerCreation(msgs, memory, invocationNamespace)
-          }
-          self ! DisableNamespaceThrottling
 
         case Pausing =>
           logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] QueueSupervisor require the activation of flushing state for an error condition")
@@ -724,7 +738,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     case _ =>
       // logscheduler must be canceled when FSM is terminated
       logScheduler.cancel()
-      checkTimer.cancel()
+      checkTimer.cancel()  //  periodic functions must be stopped on termination
       // the lifecycle of DecisionMaker conforms to the one of MemoryQueue
       actorSystem.stop(decisionMaker)
   }

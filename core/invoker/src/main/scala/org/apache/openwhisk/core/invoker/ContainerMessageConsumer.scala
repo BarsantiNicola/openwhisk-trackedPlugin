@@ -116,6 +116,8 @@ class ContainerMessageConsumer(
             feed ! MessageFeed.Processed
         }
 
+      //  added a new message for command the destruction of containers identified by their id. To not be confused with
+      //  ContainerDeletionMessage which is used to remove all the containers belonging to an action which is going to be updated
       case Success(deletion: ContainersDeletionMessage) =>
         implicit val transid: TransactionId = deletion.transid
         logging.info(this, s"deletion message for ${deletion.containers.toString()} in ${deletion.invocationNamespace}/${deletion.action} is received")
@@ -147,12 +149,16 @@ class ContainerMessageConsumer(
   }
 }
 
+//  TODO object added only for testing purpose, to be removed
 object ContainerMessageConsumer{
   private val containerCount: AtomicInteger = new AtomicInteger(0)
   private var invokerInstanceId:Int = 0
 
   def setId(id: Int): Unit = invokerInstanceId = id
   def incrementAndPrint()(implicit logging: Logging): Unit = {
+    //  Only for testing purpose, i already know than cannot be allocated more than 8 containers, to semplificate the evaluation
+    //  i hardcoded it(otherwise i have also to discriminate when a request fail due to unavailable user memory)
+    if(containerCount.get()<8)
       logging.info(this, s"[Framework-Analysis][Data] {'kind': 'invokers-container-counter', 'invoker': ${invokerInstanceId}, 'memory':'${containerCount.incrementAndGet()}', 'timestamp': ${System.currentTimeMillis()}}")
   }
 

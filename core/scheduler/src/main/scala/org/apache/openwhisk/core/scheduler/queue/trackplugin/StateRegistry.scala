@@ -195,7 +195,6 @@ class StateRegistry(
   private var update : Boolean = StateRegistry.stateRegistry.nonEmpty
   private var lastUpdate : Timestamp = if( StateRegistry.updateRegistry.nonEmpty) StateRegistry.lastUpdate else new Timestamp(System.currentTimeMillis())
   private var active = true
-  //  USABLE FUNCTIONS
 
   /**
    * Try to place the given snapshot into the registry and eventually tries to store it into ETCD

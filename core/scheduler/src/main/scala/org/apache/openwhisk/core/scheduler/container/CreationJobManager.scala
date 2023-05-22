@@ -76,13 +76,14 @@ class CreationJobManager(feedFactory: (ActorRefFactory, String, String, Int, Arr
           action,
           revision,
           actionMetaData,
-          _,
+          invokerInstanceId,
           schedulerHost,
           rpcPort,
           retryCount,
           error,
           reason)) =>
       if (error.isEmpty) {
+        logging.info( this, s"[Framework-Analysis][Data][$schedulerInstanceId][$action] { 'kind':'container-created', 'invoker': ${invokerInstanceId.instance}, 'timestamp': ${System.currentTimeMillis()} }")
         logging.info(this, s"[$action] [$creationId] create container successfully")
         deleteJob(
           invocationNamespace,
