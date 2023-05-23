@@ -249,6 +249,11 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         goto(Idle) using NoActors()
 
       } else {
+        if( queue.isEmpty && containers.isEmpty)
+          actorSystem.scheduler.scheduleOnce(FiniteDuration(60,SECONDS)){
+            if( containers.isEmpty && creationIds.nonEmpty)
+              creationIds.clear()
+          }
         logging.info(
           this,
           s"[$invocationNamespace:$action:$stateName] The queue is timed out but there are still ${queue.size} activation messages or (running: ${containers.size} -> ${containers.toString}, in-progress: ${creationIds.size} -> ${creationIds.toString}) containers")
@@ -264,13 +269,18 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
         //  if the container is tagged as "onRemove" or it isn't registered to the queue it will reject it
         //  added to prevent illicit containers registration due to critical races(we have already remove it, but this messages
         //  were on the fly)
-        if( onRemoveIds.contains(request.containerId) || !containers.contains(request.containerId)){
+        if( onRemoveIds.contains(request.containerId)){
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
-        }else {
-          //  updating of the oncheck containers(received an activation)
-          onCheck.remove(request.containerId)
-          handleActivationRequest(request)
+        }else{
+          if (!containers.contains(request.containerId)) {
+             containers += request.containerId
+             sender ! GetActivationResponse(Left(NoActivationMessage()))
+             stay
+          } else {
+            onCheck.remove(request.containerId)
+            handleActivationRequest(request)
+          }
         }
       } else {
         logging.info(this, s"Removing containerId:${request.containerId} because is no more alive")
@@ -616,12 +626,18 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
       implicit val tid: TransactionId = request.transactionId
       logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Get activation request ${request.containerId}")
       if (request.alive) {
-        if (onRemoveIds.contains(request.containerId) || !containers.contains(request.containerId)) {
+        if (onRemoveIds.contains(request.containerId)) {
           sender ! GetActivationResponse(Left(NoActivationMessage()))
           stay
         }else {
-          onCheck.remove(request.containerId)
-          handleActivationRequest(request)
+          if (!containers.contains(request.containerId)) {
+            containers += request.containerId
+            sender ! GetActivationResponse(Left(NoActivationMessage()))
+            stay
+          } else {
+            onCheck.remove(request.containerId)
+            handleActivationRequest(request)
+          }
         }
       } else {
         logging.info(this, s"Remove containerId because ${request.containerId} is not alive")
