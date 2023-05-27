@@ -274,7 +274,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           stay
         }else{
           if (!containers.contains(request.containerId)) {
-             containers += request.containerId
              sender ! GetActivationResponse(Left(NoActivationMessage()))
              stay
           } else {
@@ -631,7 +630,6 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
           stay
         }else {
           if (!containers.contains(request.containerId)) {
-            containers += request.containerId
             sender ! GetActivationResponse(Left(NoActivationMessage()))
             stay
           } else {

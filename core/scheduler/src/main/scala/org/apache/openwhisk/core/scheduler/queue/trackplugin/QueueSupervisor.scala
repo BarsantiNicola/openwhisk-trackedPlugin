@@ -38,6 +38,8 @@ import org.apache.openwhisk.core.etcd.EtcdType._
 import java.nio.charset.StandardCharsets
 import scala.collection.JavaConverters._
 
+case class InvokerPriority(invokerId: Int, priority: Long)
+
 /**
  * Class nested to the SchedulingDecisionMaker actor to control the action containers management. The core parts of the
  * component are represented by the schedule function which can control the number of used containers by changing a set
@@ -56,49 +58,64 @@ import scala.collection.JavaConverters._
  * @param namespace name of the invocation namespace assigned to the memoryQueue
  * @param action    name of the action assigned to the memoryQueue
  */
-
 class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val annotations: Parameters, val stateRegistry : StateRegistry, val etcdClient: EtcdClient )(implicit val logging: Logging, ec: ExecutionContext) {
 
+  ////  PARAMETERS
+  private var maxAddingTime: Option[Long] = None //  time used to identify an error(system unable to satisfy the containers creations)
+  private var executionTime: Option[Double] = None // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
+  private val creationTime: Double = 1000 //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+  private var onFlushTimeout: Option[Long] = None //  timeout to identify an error state
+  //  period of iat evaluation in ms. On usage it is scaled to the executionTime+creationTime
+  //  the reasons of this solution are:
+  //  - to stabilize the iar, it changes at most every 60s ignoring small variation into a period
+  //  - increase the precision of the estimation as more values are considered into the iar evaluation
+  //  Reducing the value, reduces the containers usage but also increments the system instability(higher response time peaks)
+  //  due the random high variation of iar and reduced precision of the iar estimation
+  private val iat_metric_period: Long = 60000
+
+  //  time to wait to create a container after a destruction in ms. Be caution on its change, lesser values of 500ms can produce
+  //  inconsistencies on the TrackedMemoryQueue subsystem. This is a problem resolvable only with a new design of the invokers
+  private val safeCreationTime = 500
+  //  time to wait to destroy a container after a creation in ms, can be used to increase the containers presence and stabilize
+  //  the overall system(containers remains for more time allowing to serve more requests before being destroyed, this will
+  //  produce a lesser containers creation and response times. Value lesser than 2s can produce inconsistencies on the TrackedMemoryQueue
+  //  subsystem. This is a problem resolvable only with a new design of the invokers
+  private val safeRemoveTime = 5000
+
+  ////
+
   // Containers control variables
-  implicit var maxWorkers: Int = annotations.getAs[Int]("max-workers").getOrElse(supervisorConfig.maxWorkers)
+  implicit private var maxWorkers: Int = annotations.getAs[Int]("max-workers").getOrElse(supervisorConfig.maxWorkers)
   //  maximum number of assignable containers to the action
-  implicit var minWorkers: Int = annotations.getAs[Int]("min-workers").getOrElse(supervisorConfig.minWorkers)
+  implicit private var minWorkers: Int = annotations.getAs[Int]("min-workers").getOrElse(supervisorConfig.minWorkers)
   //  minimum number of assigned containers to the action
-  implicit var readyWorkers: Int = annotations.getAs[Int]("ready-workers").getOrElse(supervisorConfig.readyWorkers)
+  implicit private var readyWorkers: Int = annotations.getAs[Int]("ready-workers").getOrElse(supervisorConfig.readyWorkers)
   //  minimum number of containers ready to accept a request assigned to the action
 
   //  used to understand if a dynamic change of action annotations is happened
-  private var annotatedMin : Int = minWorkers
-  private var annotatedMax : Int = maxWorkers
-  private var annotatedReady : Int = readyWorkers
+  private[QueueSupervisor] var annotatedMin : Int = minWorkers
+  private[QueueSupervisor] var annotatedMax : Int = maxWorkers
+  private[QueueSupervisor] var annotatedReady : Int = readyWorkers
 
   // Counters for internal functionalities
   private[QueueSupervisor] var rejectedRequests = new AtomicInteger(0)    //  counter of the rejected activations in last 1m
   private[QueueSupervisor] val acceptedRequests = new AtomicInteger(0)    //  last minute arrivals(used to compute iar)
   private[QueueSupervisor] var associations : Set[ContainerInvoker] = Set.empty[ContainerInvoker]
 
-  implicit val inProgressCreations: AtomicInteger = new AtomicInteger(0) //  counter of the containers in progress creations
+  implicit private val inProgressCreations: AtomicInteger = new AtomicInteger(0) //  counter of the containers in progress creations
+  private var waitToDestroy: Long = 0 //  used to check if the supervisor has to wait for performing a RemoveReadyContainer decision
+  private var waitToCreate: Long = 0 //  used to check if the supervisor has to wait for performing an AddContainer decision
+  private var iar: Double = 0                // [Metric] average inter-arrival rate of requests
+  private var invokersState: Option[List[InvokerUsage]] = None //  list of invokers resources
 
   //  Timers for periodic tasks execution
   private[QueueSupervisor] var schedulerTimer = new Timer // periodic scheduler execution
   private[QueueSupervisor] val metricsTimer = new Timer    // periodic metrics update execution
-  private var schedulerPeriod: Duration = Duration(100, MILLISECONDS) //  can be used to change runtime the period of scheduling
+  private[QueueSupervisor] var schedulerPeriod: Duration = Duration(100, MILLISECONDS) //  can be used to change runtime the period of scheduling
 
-  //  Internal variables
-  private var maxAddingTime : Option[Long] = None  //  time used to identify an error(system unable to satisfy the containers creations)
-  private var executionTime : Option[Double] = None  // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
-  private val creationTime : Double = 1000  //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
-  private var waitToDestroy : Long = 0
-  private var waitToCreate : Long = 0
-  private var onFlushTimeout : Option[Long] = None
-  private var invokersState : Option[List[InvokerUsage]] = None
-  private val gson = new Gson()
-  private val safeCreationTime = 250
-  private val safeRemoveTime = 5000
-  var iar: Double = 0                // [Metric] average inter-arrival rate of requests
-
-
+  private val gson = new Gson()  //  can be removed, used only to print a test metric
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
+  //  policy applied on containers creation(decide when to add or remove a container)
   private[QueueSupervisor]  var containerPolicy : ContainerSchedulePolicy = annotations
     .getAs[String]("container-policy")
     .getOrElse(supervisorConfig.schedulePolicy) match {
@@ -110,7 +127,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       case "All"  =>  All()
       case _ => AsRequested()
   }
-
+  //  policy applied on action acceptance(decide when to accept or reject an activation request)
   private[QueueSupervisor] var activationPolicy : ActivationSchedulePolicy = annotations
     .getAs[String]("activation-policy")
     .getOrElse(supervisorConfig.activationPolicy) match {
@@ -121,6 +138,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       case _ => AcceptAll()
   }
 
+  //  policy applied on invokers priority definition(decides the invokers priorities for adding/removing containers)
   private[QueueSupervisor] var invokerPriorityPolicy : InvokerPriorityPolicy = annotations
     .getAs[String]("invoker-priority-policy")
     .getOrElse(supervisorConfig.invokerPriorityPolicy) match {
@@ -135,7 +153,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
             case Some(value:Double) if value > 0 => iar = ( iar + (acceptedRequests.getAndSet(0) + rejectedRequests.getAndSet(0))/value)/2
             case _ => iar = 0
           }
-        }, 1000, 60000 )
+        }, 500, iat_metric_period )
 
   //  execution of periodic scheduling, the period can be changed runtime using changeSchedulerPeriod(period)
   if( annotations.getAs[Boolean]("reactive").getOrElse(true))
@@ -144,7 +162,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       }, 100, schedulerPeriod.toMillis )  //  first delay fixed to give time to the system to initialize itself
 
 
-  invokerUpdate
+  invokerUpdate(stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
 
   /**
    * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact
@@ -158,7 +176,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param states: map with all the information available of the instantiated queues( "namespace--action" -> StateInformation )
    */
   def schedule(localUpdateState: UpdateState, globalUpdateState: UpdateState, states: Map[String, StateInformation]): Unit = {
-    invokerUpdate
+    //  placed here to not compromise the StateRegistry update states(taking the stateInformation will reset the update flag)
+    //  in order to keep working both the schedule and the invokerPriority mechanism, it is needed they work starting from the
+    //  same state extraction
+    invokerUpdate(localUpdateState, globalUpdateState, states)
       //
       //  PLACE YOUR DYNAMIC SCHEDULER BEHAVIOR HERE
       //
@@ -184,6 +205,10 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     result
   }
 
+  /**
+   * Checks if the annotations are changed and in the case adapt the supervisor configuration
+   * @param annotations set of annotations applied on action configuration(wsk action create ... -a annotation_name annotation_value)
+   */
   private def update(annotations: Parameters): Unit = {
     val res = (
       annotations.getAs[Int]("max-workers").getOrElse(maxWorkers),
@@ -221,10 +246,14 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   }
 
-  private def invokerUpdate: Future[Unit] = getInvokerStates()(etcdClient, ec).map { invokers =>
+  /**
+   * Compute the priorities starting from the values stored into etcd
+   * @return returns a future indicating the task state
+   */
+  private def invokerUpdate(localUpdateState: UpdateState, globalUpdateState: UpdateState, states: Map[String, StateInformation]): Future[Unit] = getInvokerStates()(etcdClient, ec).map { invokers =>
     invokersState = Option(invokers.map { invoker => InvokerUsage(invoker.id.instance, if (invoker.status.isUsable) invoker.id.userMemory.toMB else 0) })
     invokersState.foreach {
-      usages: List[InvokerUsage] => updateInvokersPriority(invokerPriorityPolicy.compute(computeGlobalInvokersUsage(usages)))(etcdClient)
+      usages: List[InvokerUsage] => updateInvokersPriority(invokerPriorityPolicy.compute(computeGlobalInvokersUsage(usages, localUpdateState, globalUpdateState, states)))(etcdClient)
     }
   }
 
@@ -345,8 +374,8 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String], et: Option[Double]) : DecisionResults = {
 
     executionTime = et match{
-      case Some(value:Double) => Option(60000/(value+creationTime))
-      case _ => Option(60000/creationTime)
+      case Some(value:Double) => Option(iat_metric_period/(value+creationTime))
+      case _ => Option(iat_metric_period/creationTime)
     }
 
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
@@ -449,12 +478,17 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   }
 
+  /**
+   * Compute the global invokers usage adding the informations coming from etcd. The system consider each action as a namespace,
+   * in the end the results are the same as considering a unique memory for the namespace but our method is compatible with
+   * memory assigned in a per-action way
+   * @param personal queue-supervisor local invoker state
+   * @return a list of invokers usage globally computed using the stateRegistry informations
+   */
+  private def computeGlobalInvokersUsage(personal: List[InvokerUsage],localUpdateState: UpdateState, globalUpdateState: UpdateState, states: Map[String, StateInformation]): List[InvokerUsage] = {
 
-
-  private def computeGlobalInvokersUsage(personal: List[InvokerUsage]): List[InvokerUsage] = {
-
-    if( stateRegistry.getUpdateStatus.update || StateRegistry.getUpdateStatus(namespace, action).update){
-        stateRegistry.getStates
+    if( localUpdateState.update || globalUpdateState.update){
+      states
           .map{ record =>record._2.invokersState.toList}
           .reduce{(x,y) => x++y}
           .groupBy{_.invokerId}
@@ -473,8 +507,17 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    */
   def activationsRecentlyRejected() : Int = rejectedRequests.get()
 
+  /**
+   * called from the TrackedMemoryQueue in case of a FailedCreationJob to inform the queueSupervisor
+   */
   def failedJob() : Unit = inProgressCreations.decrementAndGet()
 
+  /**
+   * Flushing state happens when no containers are present and a FailedCreationJob arises. In order to try to resolve
+   * the flushing state we need to successfully create a container. I wrote this function to leave the possibility to
+   * create advanced and more efficient method during system improvements
+   * @return the decision elaborated by the queueSupervisor to resolve the flush
+   */
   def tryResolveFlush(): DecisionResults = {
     onFlushTimeout match {
       case Some(timeout: Long) if System.currentTimeMillis() > timeout =>
@@ -488,6 +531,12 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     }
   }
 
+  /**
+   * Extracts from etcd the invoker states information
+   * @param etcdClient a client provided by openwhisk to interact with etcd
+   * @param ec an execution context to manage the futures
+   * @return a future that will be populated with the list of invokerHealth when completed
+   */
   private def getInvokerStates()(implicit etcdClient: EtcdClient, ec: ExecutionContext): Future[List[InvokerHealth]] = {
       etcdClient
         .getPrefix(InvokerKeys.prefix)
@@ -518,6 +567,13 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
         }
     }
 
+  /**
+   * Updates the invokers priorities on etcd in order to inform the containerManager which has to schedule the containers
+   * TODO a better solution would be to change the message exchanged between the TrackedMemoryQueue and the ContainerManager
+   * in order to directly inform what invokers has to been used
+   * @param priorities set of priorities to be stored
+   * @param etcdClient a client provided by openwhisk to interact with etcd
+   */
   private def updateInvokersPriority(priorities: List[InvokerPriority])(implicit etcdClient: EtcdClient) : Unit = {
     logging.info(this, s"[Framework-Analysis][Data] {'kind': 'priority-update', 'update': '${gson.toJson(priorities.toSet)}', 'timestamp': ${System.currentTimeMillis()}}")
     priorities.foreach{ priority =>
@@ -525,11 +581,17 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     }
   }
 
+  /**
+   * Used to registry a new association of a container to an invokers. It is used during container removal to choose what
+   * container has to be removed basing on a priority decision
+   * @param containerId the id of a new container associated to the TrackedMemoryQueue
+   * @param invokerId the invokerId on which the containers has been created
+   */
   def registryAssociation( containerId: String, invokerId: Int): Unit = associations += ContainerInvoker(containerId, invokerId)
 
 }
 
-case class InvokerPriority(invokerId: Int, priority: Long)
+
 
 
 
