@@ -61,27 +61,24 @@ case class InvokerPriority(invokerId: Int, priority: Long)
 class QueueSupervisor( val namespace: String, val action: String, supervisorConfig: SchedulingSupervisorConfig, val annotations: Parameters, val stateRegistry : StateRegistry, val etcdClient: EtcdClient )(implicit val logging: Logging, ec: ExecutionContext) {
 
   ////  PARAMETERS
-  private var maxAddingTime: Option[Long] = None //  time used to identify an error(system unable to satisfy the containers creations)
-  private var executionTime: Option[Double] = None // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
-  private val creationTime: Double = 1000 //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
-  private var onFlushTimeout: Option[Long] = None //  timeout to identify an error state
+  private val creationTime: Double = supervisorConfig.creationTime //  used as an adding offset for the iar computation to consider also container creation time TODO evaluated dynamically
+
   //  period of iat evaluation in ms. On usage it is scaled to the executionTime+creationTime
   //  the reasons of this solution are:
   //  - to stabilize the iar, it changes at most every 60s ignoring small variation into a period
   //  - increase the precision of the estimation as more values are considered into the iar evaluation
   //  Reducing the value, reduces the containers usage but also increments the system instability(higher response time peaks)
   //  due the random high variation of iar and reduced precision of the iar estimation
-  private val iat_metric_period: Long = 60000
+  private val iat_metric_period: Long = supervisorConfig.iarPeriod
 
   //  time to wait to create a container after a destruction in ms. Be caution on its change, lesser values of 500ms can produce
   //  inconsistencies on the TrackedMemoryQueue subsystem. This is a problem resolvable only with a new design of the invokers
-  private val safeCreationTime = 500
+  private val safeCreationTime = supervisorConfig.creationTimeBlock
   //  time to wait to destroy a container after a creation in ms, can be used to increase the containers presence and stabilize
   //  the overall system(containers remains for more time allowing to serve more requests before being destroyed, this will
   //  produce a lesser containers creation and response times. Value lesser than 2s can produce inconsistencies on the TrackedMemoryQueue
   //  subsystem. This is a problem resolvable only with a new design of the invokers
-  private val safeRemoveTime = 5000
-
+  private val safeRemoveTime = supervisorConfig.deletionTimeBlock
   ////
 
   // Containers control variables
@@ -107,11 +104,15 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private var waitToCreate: Long = 0 //  used to check if the supervisor has to wait for performing an AddContainer decision
   private var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private var invokersState: Option[List[InvokerUsage]] = None //  list of invokers resources
-
+  private var maxAddingTime: Option[Long] = None //  time used to identify an error(system unable to satisfy the containers creations)
+  private var executionTime: Option[Double] = None // used for evaluating the iar(we are interested in how many requests arrive into an execution time)
+  private var onFlushTimeout: Option[Long] = None //  timeout to identify an error state
   //  Timers for periodic tasks execution
   private[QueueSupervisor] var schedulerTimer = new Timer // periodic scheduler execution
   private[QueueSupervisor] val metricsTimer = new Timer    // periodic metrics update execution
-  private[QueueSupervisor] var schedulerPeriod: Duration = Duration(100, MILLISECONDS) //  can be used to change runtime the period of scheduling
+  private[QueueSupervisor] var schedulerPeriod: Duration = Duration(supervisorConfig.schedulerPeriod, MILLISECONDS) //  can be used to change runtime the period of scheduling
+  private[QueueSupervisor] var lastHandled : Long = System.currentTimeMillis()+supervisorConfig.idlePeriod
+  private[QueueSupervisor] var idleState = false;
 
   private val gson = new Gson()  //  can be removed, used only to print a test metric
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
@@ -165,12 +166,8 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   invokerUpdate(stateRegistry.getUpdateStatus, StateRegistry.getUpdateStatus(namespace, action), stateRegistry.getStates )
 
   /**
-   * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact
-   * with the environment via the following set of functions:
-   * - changeSchedulerPeriod: modify the period in which this function is called by the environment
-   * - setMaxWorkers: change the maximum number of containers that the supervisor can allocate
-   * - setMinWorkers: change the minimum number of containers that the supervisor has to assign to the action
-   * - setReadyWorkers: change the minimum number of ready containers that the supervisor has to guarantee to be always available the action
+   * Function to define the scheduling behavior of the action queue. It manages the priority policy, the idle state and then
+   * calls the upper level scheduler
    * @param localUpdateState: gives information about the queue(if some change happened, and the time passed from the last update)
    * @param globalUpdateState: gives information about the global state(if some change happened, and the time passed from the last update)
    * @param states: map with all the information available of the instantiated queues( "namespace--action" -> StateInformation )
@@ -180,9 +177,26 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     //  in order to keep working both the schedule and the invokerPriority mechanism, it is needed they work starting from the
     //  same state extraction
     invokerUpdate(localUpdateState, globalUpdateState, states)
-      //
-      //  PLACE YOUR DYNAMIC SCHEDULER BEHAVIOR HERE
-      //
+    if(!idleState)
+      secondLayerScheduling( localUpdateState, globalUpdateState, states)
+  }
+
+  /**
+   * Function to define the scheduling behavior of the action queue. It is called periodically by the instance and can interact
+   * with the environment via the following set of functions:
+   * - changeSchedulerPeriod: modify the period in which this function is called by the environment
+   * - setMaxWorkers: change the maximum number of containers that the supervisor can allocate
+   * - setMinWorkers: change the minimum number of containers that the supervisor has to assign to the action
+   * - setReadyWorkers: change the minimum number of ready containers that the supervisor has to guarantee to be always available the action
+   *
+   * @param localUpdateState  : gives information about the queue(if some change happened, and the time passed from the last update)
+   * @param globalUpdateState : gives information about the global state(if some change happened, and the time passed from the last update)
+   * @param states            : map with all the information available of the instantiated queues( "namespace--action" -> StateInformation )
+   */
+  def secondLayerScheduling(state: UpdateState, state1: UpdateState, stringToInformation: Map[String, StateInformation]): Unit = {
+    //
+    //  PLACE YOUR DYNAMIC SCHEDULER BEHAVIOR HERE
+    //
   }
 
   /**
@@ -197,6 +211,12 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    */
   def handleActivation(msg: ActivationMessage, containers: Int, ready: Int, enqueued: Int, incoming: Int): Boolean = {
 
+    lastHandled = System.currentTimeMillis() + supervisorConfig.idlePeriod
+    if( idleState ) {
+      logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] Request received, aborting idle state transition")
+      setMinWorkers(annotatedMin) //  in case a new request come we restore the minWorkers configuration
+        idleState = false
+    }
     val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
     if (!result)
       rejectedRequests.incrementAndGet()
@@ -378,8 +398,14 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       case _ => Option(iat_metric_period/creationTime)
     }
 
+    if (lastHandled < System.currentTimeMillis() && !idleState) {
+      logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] No request received for ${supervisorConfig.idlePeriod}, removing container to enable idle state")
+      idleState = true
+      setMinWorkers(0) //  in order to go to idle state the memoryQueue needs 0 containers, we need to overwrite the config
+    }
+
     val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
-    logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'supervisor-state', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
+    logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'supervisor-state', 'action': '$action', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
 
