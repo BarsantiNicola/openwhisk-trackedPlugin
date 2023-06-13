@@ -210,6 +210,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     if( idleState ) {
       logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] Request received, aborting idle state transition")
       setMinWorkers(annotatedMin) //  in case a new request come we restore the minWorkers configuration
+      setReadyWorkers(annotatedReady)  //  in case a new request come we restore the readyWorkers configuration
       idleState = false
     }
     val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
@@ -398,6 +399,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     if (lastHandled < System.currentTimeMillis() && !idleState && i_iat == 0) {
       logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] No request received for ${supervisorConfig.idlePeriod}, removing container to enable idle state")
       idleState = true
+      setReadyWorkers(0)
       setMinWorkers(0) //  in order to go to idle state the memoryQueue needs 0 containers, we need to overwrite the config
     }
 
