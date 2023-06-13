@@ -71,13 +71,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   //  due the random high variation of iar and reduced precision of the iar estimation
   private val iat_metric_period: Long = supervisorConfig.iarPeriod
 
-  //  time to wait to create a container after a destruction in ms. Be caution on its change, lesser values of 500ms can produce
-  //  inconsistencies on the TrackedMemoryQueue subsystem. This is a problem resolvable only with a new design of the invokers
-  private val safeCreationTime = supervisorConfig.creationTimeBlock
   //  time to wait to destroy a container after a creation in ms, can be used to increase the containers presence and stabilize
   //  the overall system(containers remains for more time allowing to serve more requests before being destroyed, this will
-  //  produce a lesser containers creation and response times. Value lesser than 2s can produce inconsistencies on the TrackedMemoryQueue
-  //  subsystem. This is a problem resolvable only with a new design of the invokers
+  //  produce a lesser containers creation and response times
   private val safeRemoveTime = supervisorConfig.deletionTimeBlock
   ////
 
@@ -90,9 +86,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   //  minimum number of containers ready to accept a request assigned to the action
 
   //  used to understand if a dynamic change of action annotations is happened
-  private[QueueSupervisor] var annotatedMin : Int = minWorkers
-  private[QueueSupervisor] var annotatedMax : Int = maxWorkers
-  private[QueueSupervisor] var annotatedReady : Int = readyWorkers
+  private[QueueSupervisor] var annotatedMin : Int = annotations.getAs[Int]("min-workers").getOrElse(supervisorConfig.minWorkers)
+  private[QueueSupervisor] var annotatedMax : Int = annotations.getAs[Int]("max-workers").getOrElse(supervisorConfig.maxWorkers)
+  private[QueueSupervisor] var annotatedReady : Int = annotations.getAs[Int]("ready-workers").getOrElse(supervisorConfig.readyWorkers)
 
   // Counters for internal functionalities
   private[QueueSupervisor] var rejectedRequests = new AtomicInteger(0)    //  counter of the rejected activations in last 1m
@@ -101,7 +97,6 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
   implicit private val inProgressCreations: AtomicInteger = new AtomicInteger(0) //  counter of the containers in progress creations
   private var waitToDestroy: Long = 0 //  used to check if the supervisor has to wait for performing a RemoveReadyContainer decision
-  private var waitToCreate: Long = 0 //  used to check if the supervisor has to wait for performing an AddContainer decision
   private var iar: Double = 0                // [Metric] average inter-arrival rate of requests
   private var invokersState: Option[List[InvokerUsage]] = None //  list of invokers resources
   private var maxAddingTime: Option[Long] = None //  time used to identify an error(system unable to satisfy the containers creations)
@@ -112,7 +107,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
   private[QueueSupervisor] val metricsTimer = new Timer    // periodic metrics update execution
   private[QueueSupervisor] var schedulerPeriod: Duration = Duration(supervisorConfig.schedulerPeriod, MILLISECONDS) //  can be used to change runtime the period of scheduling
   private[QueueSupervisor] var lastHandled : Long = System.currentTimeMillis()+supervisorConfig.idlePeriod
-  private[QueueSupervisor] var idleState = false;
+  private[QueueSupervisor] var idleState = false
 
   private val gson = new Gson()  //  can be removed, used only to print a test metric
   private[QueueSupervisor] var snapshot = Set.empty[String]  // Used to keep track of containers creation
@@ -193,7 +188,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param globalUpdateState : gives information about the global state(if some change happened, and the time passed from the last update)
    * @param states            : map with all the information available of the instantiated queues( "namespace--action" -> StateInformation )
    */
-  def secondLayerScheduling(state: UpdateState, state1: UpdateState, stringToInformation: Map[String, StateInformation]): Unit = {
+  private def secondLayerScheduling(localUpdateState: UpdateState, globalUpdateState: UpdateState, states: Map[String, StateInformation]): Unit = {
     //
     //  PLACE YOUR DYNAMIC SCHEDULER BEHAVIOR HERE
     //
@@ -215,7 +210,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     if( idleState ) {
       logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] Request received, aborting idle state transition")
       setMinWorkers(annotatedMin) //  in case a new request come we restore the minWorkers configuration
-        idleState = false
+      idleState = false
     }
     val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
     if (!result)
@@ -231,9 +226,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    */
   private def update(annotations: Parameters): Unit = {
     val res = (
-      annotations.getAs[Int]("max-workers").getOrElse(maxWorkers),
-      annotations.getAs[Int]("min-workers").getOrElse(minWorkers),
-      annotations.getAs[Int]("ready-workers").getOrElse(readyWorkers))
+      annotations.getAs[Int]("max-workers").getOrElse(annotatedMax),
+      annotations.getAs[Int]("min-workers").getOrElse(annotatedMin),
+      annotations.getAs[Int]("ready-workers").getOrElse(annotatedReady))
 
     if( res._2 != annotatedMin){
       annotatedMin = res._2
@@ -308,7 +303,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The maximum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  def setMaxWorkers(num: Int): Boolean = num match {
+  private def setMaxWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[maxWorkers<minWorkers]. Operation aborted"); false
     case _ if num < readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $readyWorkers)[maxWorkers<readyWorkers]. Operation aborted"); false
@@ -330,7 +325,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The minimum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  def setMinWorkers(num: Int): Boolean = num match {
+  private def setMinWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[minWorkers>maxWorkers]. Operation aborted"); false
     case _ if num + readyWorkers > maxWorkers =>
@@ -352,7 +347,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The number of ready containers to be set
    * @return True in case of success, false otherwise
    */
-  def setReadyWorkers(num: Int): Boolean = num match {
+  private def setReadyWorkers(num: Int): Boolean = num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[readyWorkers>maxWorkers]. Operation aborted"); false
     case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[readyWorkers<minWorkers]. Operation aborted"); false
@@ -391,20 +386,21 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param enqueued   A value computed by the environment representing the number of enqueued requests
    * @return Returns three types of messages: AddContainer(num)[Add num containers], RemoveReadyContainers(num)[Remove num containers], SKip[do nothing]
    */
-  def elaborate( containers: Set[String], incoming: Int, enqueued: Int, readyContainers: Set[String], et: Option[Double]) : DecisionResults = {
+  private def elaborate(containers: Set[String], incoming: Int, enqueued: Int, onRemove: Boolean, readyContainers: Set[String], et: Option[Double]) : DecisionResults = {
 
     executionTime = et match{
       case Some(value:Double) => Option(iat_metric_period/(value+creationTime))
       case _ => Option(iat_metric_period/creationTime)
     }
 
-    if (lastHandled < System.currentTimeMillis() && !idleState) {
+    val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
+
+    if (lastHandled < System.currentTimeMillis() && !idleState && i_iat == 0) {
       logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] No request received for ${supervisorConfig.idlePeriod}, removing container to enable idle state")
       idleState = true
       setMinWorkers(0) //  in order to go to idle state the memoryQueue needs 0 containers, we need to overwrite the config
     }
 
-    val i_iat :Int = math.round(iar).toInt  // Average interarrival rate of the requests
     logging.info(this, s"[Framework-Analysis][$namespace/$action][Data] { 'kind': 'supervisor-state', 'action': '$action', 'containers': ${containers.size}, 'iar': $i_iat, 'incoming': $incoming, 'enqueued': $enqueued, 'ready': ${readyContainers.size}, 'timestamp': ${System.currentTimeMillis()}}")
 
     val difference = computeAddedContainers(containers) //  evaluation of added containers from the last call
@@ -435,19 +431,20 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
 
     containerPolicy.grant( minWorkers, readyWorkers, maxWorkers, containers.size, readyContainers, inProgressCreationsCount, i_iat, enqueued, incoming) match{
       case DecisionResults(AddContainer, value) =>
-        if( waitToCreate > System.currentTimeMillis())
+        if( onRemove ) //  before adding new containers is better to end previous containers remove to maintain the system consistent
           DecisionResults(Skip,0)
         else {
           waitToDestroy = System.currentTimeMillis() + safeRemoveTime
           inProgressCreations.addAndGet(value)
-          maxAddingTime = Option(System.currentTimeMillis() + 300000) // set a limit of 5m for the containers creation
+          // set a limit of 20s for a container creation, after that we may detect an error condition
+          // if there are no containers and after 20s a requested container isn't created we move the system in flushing state
+          maxAddingTime = Option(System.currentTimeMillis() + 20000)
           DecisionResults(AddContainer, value)
         }
       case DecisionResults(RemoveReadyContainer(removing),_) =>
         if( waitToDestroy > System.currentTimeMillis())
           DecisionResults(Skip,0)
         else {
-          waitToCreate = System.currentTimeMillis() + safeCreationTime
           waitToDestroy = System.currentTimeMillis() + safeRemoveTime
           val result = invokerPriorityPolicy.selectRemove(readyContainers, removing.size, associations)
           if (result.isEmpty)
@@ -498,6 +495,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       snapshot.currentContainers.diff(snapshot.onRemoveContainers),
       snapshot.incomingMsgCount.get(),
       snapshot.currentMsgCount,
+      snapshot.onRemoveContainers.nonEmpty,
       snapshot.readyContainers.diff(snapshot.onRemoveContainers),
       snapshot.averageDuration
     )
@@ -523,15 +521,6 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     }else
       personal
   }
-
-  /**
-   * Used as a block for the Idle condition queue state. In the default configuration the queue will became idle and
-   * after some time it will automatically remove it, however this gives problem when is our system that blocks requests.
-   * The solution is to let the queue consider not only the number of enqueued requests but also the number of recently(1m)
-   * rejected requests. They have to be 0 both to pass to idle state
-   * @return
-   */
-  def activationsRecentlyRejected() : Int = rejectedRequests.get()
 
   /**
    * called from the TrackedMemoryQueue in case of a FailedCreationJob to inform the queueSupervisor

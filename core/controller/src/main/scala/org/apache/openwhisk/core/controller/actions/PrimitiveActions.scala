@@ -200,6 +200,7 @@ protected[actions] trait PrimitiveActions {
       // is caller waiting for the result of the activation?
       waitForResponse
         .map { timeout =>
+          logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': '${user.namespace.name.name}', 'action': '${action.name.name}', 'event': 'activation_published', 'activation_id': '${message.activationId}', 'time': ${System.currentTimeMillis()}}")
           // yes, then wait for the activation response from the message bus
           // (known as the active response or active ack)
           waitForActivationResponse(user, message.activationId, timeout, activeAckResponse)
@@ -642,10 +643,12 @@ protected[actions] trait PrimitiveActions {
     // 1. Wait for the active-ack to happen. Either immediately resolve the promise or poll the database quickly
     //    in case of an incomplete active-ack (record too large for example).
     activeAckResponse.foreach {
-      case Right(activation) => result.trySuccess(Right(activation))
+      case Right(activation) => logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': '${user.namespace.name.name}', 'event': 'activation_terminated', 'activation_id': '${activation.activationId}', 'time': ${System.currentTimeMillis()}}")
+        result.trySuccess(Right(activation))
       case _ if (controllerActivationConfig.pollingFromDb) =>
         pollActivation(docid, context, result, i => 1.seconds + (2.seconds * i), maxRetries = 4)
       case Left(activationId) =>
+        logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': '${user.namespace.name.name}', 'event': 'activation_terminated', 'activation_id': '$activationId', 'time': ${System.currentTimeMillis()}}")
         result.trySuccess(Left(activationId)) // complete the future immediately if it's configured to not poll db for blocking activations
     }
 
@@ -686,6 +689,7 @@ protected[actions] trait PrimitiveActions {
               LoggingMarkers.CONTROLLER_ACTIVATION_BLOCKING_DATABASE_RETRIEVAL,
               s"retrieved activation for blocking invocation via DB polling",
               logLevel = InfoLevel)
+            logging.info(this, s"[Framework-Analysis][Measure] { 'namespace': '${activation.namespace}', 'event': 'activation_terminated', 'activation_id': '${activation.activationId}', 'time': ${System.currentTimeMillis()}}")
             result.trySuccess(Right(activation.withoutLogs))
           case Failure(_: NoDocumentException) => pollActivation(docid, context, result, wait, retries + 1, maxRetries)
           case Failure(t: Throwable)           => result.tryFailure(t)
