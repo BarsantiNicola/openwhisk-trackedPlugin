@@ -209,8 +209,8 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
     lastHandled = System.currentTimeMillis() + supervisorConfig.idlePeriod
     if( idleState ) {
       logging.info( this, s"[Framework-Analysis][$namespace/$action][Event] Request received, aborting idle state transition")
-      setMinWorkers(annotatedMin) //  in case a new request come we restore the minWorkers configuration
       setReadyWorkers(annotatedReady)  //  in case a new request come we restore the readyWorkers configuration
+      setMinWorkers(annotatedMin) //  in case a new request come we restore the minWorkers configuration
       idleState = false
     }
     val result = activationPolicy.handleActivation(msg, containers, ready, enqueued, incoming, math.round(iar) )
@@ -304,7 +304,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The maximum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setMaxWorkers(num: Int): Boolean = num match {
+  private def setMaxWorkers(num: Int): Boolean = this.synchronized{ num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[maxWorkers<minWorkers]. Operation aborted"); false
     case _ if num < readyWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $readyWorkers)[maxWorkers<readyWorkers]. Operation aborted"); false
@@ -317,7 +317,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
       maxWorkers = num; true
     case _ => maxWorkers = num; true
 
-  }
+  }}
 
   /**
    * Sets the minimum number of containers that must be alwats allocated to the action. The value must be greated than zero
@@ -326,7 +326,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The minimum number of containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setMinWorkers(num: Int): Boolean = num match {
+  private def setMinWorkers(num: Int): Boolean = this.synchronized{ num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[minWorkers>maxWorkers]. Operation aborted"); false
     case _ if num + readyWorkers > maxWorkers =>
@@ -336,7 +336,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
           s"($maxWorkers < ${num + readyWorkers})[maxWorkers<minWorkers+readyWorkers]")
       true
     case _ => minWorkers = num; true
-  }
+  }}
 
   /**
    * Sets the minimum number of containers that must be always allocated to the action and be ready to execute a task.
@@ -348,10 +348,9 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
    * @param num The number of ready containers to be set
    * @return True in case of success, false otherwise
    */
-  private def setReadyWorkers(num: Int): Boolean = num match {
+  private def setReadyWorkers(num: Int): Boolean = this.synchronized{ num match {
     case _ if num < 0 => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < 0). Operation aborted"); false
     case _ if num > maxWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num > $maxWorkers)[readyWorkers>maxWorkers]. Operation aborted"); false
-    case _ if num < minWorkers => logging.error(this, s"[$namespace/$action] Error, bad workers value. ($num < $minWorkers)[readyWorkers<minWorkers]. Operation aborted"); false
     case _ if minWorkers + num > maxWorkers =>
       logging.warn(
         this,
@@ -359,7 +358,7 @@ class QueueSupervisor( val namespace: String, val action: String, supervisorConf
           s"($maxWorkers < ${minWorkers + num})[maxWorkers<minWorkers+readyWorkers]")
       readyWorkers = num; true
     case _ => readyWorkers = num; true
-  }
+  }}
 
   ////  INTERNAL FUNCTIONS[TO NOT BE USED]
 

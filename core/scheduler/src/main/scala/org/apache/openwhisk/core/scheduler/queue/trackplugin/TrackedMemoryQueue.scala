@@ -489,9 +489,10 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
     //  case for removing containers on QueueSupervisor demand
     case Event(RemoveReadyContainer(containersToDrop), _) =>
       //  filtering the containers to not remove those who are executing requests
-      //  moreover some container can already been registered into requestBuffer but not on etcd
+      //  moreover some container can already been registered into requestBuffer but not on etcd(creationId, containers)
       //  this can create problem so that containers cannot be removed
-      val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(1) }.toSet.diff(creationIds)
+      val droppableContainers = requestBuffer.toList.map { value => value.containerId.substring(1) }
+        .toSet.diff(creationIds).intersect(containers).diff(onRemoveIds)
       val filteredContainers = containersToDrop.intersect( droppableContainers)
       if (filteredContainers.nonEmpty) {
         logging.info(this, s"[Framework-Analysis][Event][$invocationNamespace/${action.name.name}][$stateName] Removing containers ${filteredContainers.toString()}")
@@ -979,7 +980,7 @@ class TrackedMemoryQueue(private val supervisor: QueueSupervisor,
             in,
             queue.size,
             containers.toSet,
-            requestBuffer.toList.map{ request => request.containerId.substring(1)}.toSet.diff(creationIds),
+            requestBuffer.toList.map{ request => request.containerId.substring(1)}.toSet.diff(creationIds).intersect(containers),
             onRemoveIds,
             creationIds.size,
             getStaleActivationNum(0, queue),
